@@ -257,13 +257,17 @@ class CharacteristicCallbacks : public BLECharacteristicCallbacks {
         String val = pChar->getValue();
         if (val.length() == 0) return;
 
-        if (qFull) return;  // drop if buffer is full (shouldn't happen in practice)
-
         size_t len = min((size_t)val.length(), (size_t)(MAX_STR - 1));
-        memcpy(queue[qTail], val.c_str(), len);
-        queue[qTail][len] = '\0';
-        qTail = (qTail + 1) % QUEUE_SIZE;
-        if (qTail == qHead) qFull = true;
+
+        noInterrupts();
+        if (!qFull) {
+            memcpy(queue[qTail], val.c_str(), len);
+            queue[qTail][len] = '\0';
+            qTail = (qTail + 1) % QUEUE_SIZE;
+            if (qTail == qHead) qFull = true;
+        }
+        // if qFull, drop silently — consumer is too slow
+        interrupts();
     }
 };
 
@@ -332,10 +336,19 @@ void setup() {
 // ── Loop ──────────────────────────────────────────────────────────────────────
 void loop() {
     // Drain the queue and type each pending string
-    while (!queueEmpty()) {
-        typeString(queue[qHead]);
-        qHead = (qHead + 1) % QUEUE_SIZE;
-        qFull = false;
+    while (true) {
+        noInterrupts();
+        bool empty = queueEmpty();
+        char buf[MAX_STR];
+        if (!empty) {
+            memcpy(buf, queue[qHead], MAX_STR);
+            qHead = (qHead + 1) % QUEUE_SIZE;
+            qFull = false;
+        }
+        interrupts();
+
+        if (empty) break;
+        typeString(buf);
         delay(5);  // small gap between back-to-back sends
     }
     delay(10);

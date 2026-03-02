@@ -101,6 +101,7 @@ Two flags control how symbols are typed. Set them to match the **target machine*
 |------|---------|---------|---------|
 | `--layout` | `en-US`, `en-GB` | `en-US` | Keyboard input source / locale |
 | `--os` | `other`, `macos` | `other` | OS of the target machine |
+| `--enter` | *(flag, no value)* | off | Press Enter after the text |
 
 > **`--os macos`** is needed when the target is a Mac running the British layout,
 > because macOS uses **Option+3** for `#` whereas Windows/Linux/Android use a
@@ -114,8 +115,8 @@ Two flags control how symbols are typed. Set them to match the **target machine*
 # US layout, any OS (defaults)
 python send_ble.py "Hello, World!"
 
-# UK layout on a Mac
-python send_ble.py --layout en-GB --os macos 'Hello, World *###£$@'
+# UK layout on a Mac, press Enter at the end
+python send_ble.py --layout en-GB --os macos --enter 'Hello, World *###£$@'
 
 # UK layout on Windows / Linux
 python send_ble.py --layout en-GB --os other 'Hello, World *###£$@'
@@ -124,8 +125,8 @@ python send_ble.py --layout en-GB --os other 'Hello, World *###£$@'
 ### Interactive mode (keep connection open)
 
 ```bash
-# UK layout on a Mac
-python send_ble.py --layout en-GB --os macos
+# UK layout on a Mac — each line is submitted with Enter
+python send_ble.py --layout en-GB --os macos --enter
 
 # US layout, any OS
 python send_ble.py

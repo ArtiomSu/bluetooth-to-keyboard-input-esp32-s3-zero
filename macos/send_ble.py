@@ -72,9 +72,10 @@ async def send_string(client: BleakClient, text: str) -> None:
     print(f"[BLE] Sent ({len(raw)} bytes): {text!r}")
 
 
-async def interactive_mode(client: BleakClient) -> None:
+async def interactive_mode(client: BleakClient, enter: bool = False) -> None:
     """Keep the connection open and read strings from stdin."""
-    print("[BLE] Connected. Enter text to type, or Ctrl-C / blank line to quit.\n")
+    suffix = "" if not enter else "  (+Enter)"
+    print(f"[BLE] Connected. Enter text to type{suffix}, or Ctrl-C / blank line to quit.\n")
     loop = asyncio.get_running_loop()
     while True:
         try:
@@ -84,10 +85,12 @@ async def interactive_mode(client: BleakClient) -> None:
             break
         if text == "":
             break
+        if enter:
+            text += "\n"
         await send_string(client, text)
 
 
-async def main(one_shot_text: str | None = None, layout: str = "en-US", os: str = "other") -> None:
+async def main(one_shot_text: str | None = None, layout: str = "en-US", os: str = "other", enter: bool = False) -> None:
     device = await find_device()
 
     async with BleakClient(device) as client:
@@ -97,9 +100,10 @@ async def main(one_shot_text: str | None = None, layout: str = "en-US", os: str 
         await set_os(client, os)
 
         if one_shot_text is not None:
-            await send_string(client, one_shot_text)
+            text = one_shot_text + ("\n" if enter else "")
+            await send_string(client, text)
         else:
-            await interactive_mode(client)
+            await interactive_mode(client, enter=enter)
 
     print("[BLE] Disconnected.")
 
@@ -119,6 +123,11 @@ if __name__ == "__main__":
         help="OS of the target machine: 'macos' or 'other' (Win/Linux/Android) (default: other)",
     )
     parser.add_argument(
+        "--enter",
+        action="store_true",
+        help="Press Enter after sending the text",
+    )
+    parser.add_argument(
         "text",
         nargs="*",
         help="Text to send (omit for interactive mode)",
@@ -126,7 +135,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     one_shot = " ".join(args.text) if args.text else None
     try:
-        asyncio.run(main(one_shot_text=one_shot, layout=args.layout, os=args.os))
+        asyncio.run(main(one_shot_text=one_shot, layout=args.layout, os=args.os, enter=args.enter))
     except RuntimeError as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         sys.exit(1)
