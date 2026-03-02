@@ -14,7 +14,8 @@ macOS script ──BLE──► ESP32-S3 Zero ──USB HID──► any compute
 ```
 bluetooth-input/
 ├── firmware/
-│   └── firmware.ino   ← Arduino sketch for the ESP32-S3
+│   ├── firmware.ino   ← Arduino sketch for the ESP32-S3
+│   └── keytypes.h     ← shared types (KeyLayout, KeyOS, KeyEntry)
 └── macos/
     ├── send_ble.py    ← Python BLE client for macOS
     └── requirements.txt
@@ -92,15 +93,41 @@ pip install -r requirements.txt
 > macOS may ask for Bluetooth permission the first time you run the script.
 > Allow it in **System Settings → Privacy & Security → Bluetooth**.
 
+### Specify your keyboard layout and target OS
+
+Two flags control how symbols are typed. Set them to match the **target machine** (the one the ESP32 is plugged into).
+
+| Flag | Options | Default | Purpose |
+|------|---------|---------|---------|
+| `--layout` | `en-US`, `en-GB` | `en-US` | Keyboard input source / locale |
+| `--os` | `other`, `macos` | `other` | OS of the target machine |
+
+> **`--os macos`** is needed when the target is a Mac running the British layout,
+> because macOS uses **Option+3** for `#` whereas Windows/Linux/Android use a
+> dedicated ISO key (HID 0x32).
+>
+> `other` covers Windows, Linux, and Android — they all behave identically.
+
 ### One-shot (send a single string and exit)
 
 ```bash
+# US layout, any OS (defaults)
 python send_ble.py "Hello, World!"
+
+# UK layout on a Mac
+python send_ble.py --layout en-GB --os macos 'Hello, World *###£$@'
+
+# UK layout on Windows / Linux
+python send_ble.py --layout en-GB --os other 'Hello, World *###£$@'
 ```
 
 ### Interactive mode (keep connection open)
 
 ```bash
+# UK layout on a Mac
+python send_ble.py --layout en-GB --os macos
+
+# US layout, any OS
 python send_ble.py
 ```
 
@@ -111,15 +138,19 @@ Ctrl-C to disconnect.
 
 ## How it works
 
-1. **BLE GATT server** — the ESP32 exposes one writable characteristic:
+1. **BLE GATT server** — the ESP32 exposes three writable characteristics:
    - Service UUID: `12340000-1234-1234-1234-123456789abc`
-   - Characteristic UUID: `12340001-1234-1234-1234-123456789abc`
+   - Text characteristic: `12340001-1234-1234-1234-123456789abc` — string to type
+   - Layout characteristic: `12340002-1234-1234-1234-123456789abc` — `"en-US"` or `"en-GB"`
+   - OS characteristic: `12340003-1234-1234-1234-123456789abc` — `"macos"` or `"other"`
 
-2. The macOS script scans for a device named `ESP32-KB`, connects, and writes
-   the UTF-8-encoded string to the characteristic.
+2. On connect, the macOS script writes the chosen layout and OS to their
+   respective characteristics, then writes the UTF-8-encoded text.
 
-3. The ESP32 receives the data in a callback, queues it, and in `loop()` calls
-   `Keyboard.print()` to type each character through USB HID.
+3. The ESP32 decodes the UTF-8 string codepoint by codepoint and looks each one
+   up in a layout + OS-specific HID keycode table. Each character is typed by
+   pressing the correct raw HID key with the required modifiers (Shift and/or
+   Option/Alt), so symbols are always correct on the target machine.
 
 ---
 
@@ -128,7 +159,10 @@ Ctrl-C to disconnect.
 | Symptom | Fix |
 |---------|-----|
 | Device not found during scan | Confirm the ESP32 is powered and the USB cable supports data (not charge-only). Check it enumerates as a keyboard in **System Information → USB**. |
-| Characters typed incorrectly | The HID keyboard defaults to **US layout**. Change the layout in the Arduino sketch if needed. |
+| `#` types as `£` on a Mac | Add `--os macos`; macOS uses Option+3 for `#` on the British layout. |
+| `#` types as `£` on Windows/Linux | Use `--os other` (the default); HID 0x32 produces `#` there. |
+| `@` and `"` are swapped | Make sure `--layout en-GB` is set to match the target machine's input source. |
+| `£` is skipped or missing | Use `--layout en-GB`; `£` is only in the GB keycode table. |
 | macOS Bluetooth permission error | Go to **System Settings → Privacy & Security → Bluetooth** and enable access for Terminal / your app. |
 | Upload fails | Hold **BOOT** + press **RESET** to enter download mode before uploading. |
 | `write_gatt_char` raises MTU error | Reduce `CHUNK_SIZE` in `send_ble.py` to `100` and retry. |

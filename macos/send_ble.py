@@ -3,24 +3,36 @@
 send_ble.py — macOS BLE client for the ESP32-S3 keyboard bridge.
 
 Usage:
-    # Interactive mode (keep connection open, type multiple strings):
+    # Interactive mode (defaults to en-US layout, generic OS):
     python send_ble.py
 
-    # One-shot: send a string from the command line and exit:
-    python send_ble.py "Hello, World!"
+    # UK layout on macOS:
+    python send_ble.py --layout en-GB --os macos
+
+    # One-shot:
+    python send_ble.py --layout en-GB --os macos 'Hello, World *###£$@'
+
+    Supported layouts : en-US  en-GB
+    Supported OS      : other (Windows/Linux/Android)  macos
 
 Requires:
     pip install bleak
 """
 
+import argparse
 import asyncio
 import sys
 from bleak import BleakClient, BleakScanner
 
-# ── Must match firmware constants ─────────────────────────────────────────────
+# ── Must match firmware constants ───────────────────────────────────────────────
 DEVICE_NAME         = "ESP32-KB"
 SERVICE_UUID        = "12340000-1234-1234-1234-123456789abc"
 CHARACTERISTIC_UUID = "12340001-1234-1234-1234-123456789abc"
+LAYOUT_CHAR_UUID    = "12340002-1234-1234-1234-123456789abc"
+OS_CHAR_UUID        = "12340003-1234-1234-1234-123456789abc"
+
+SUPPORTED_LAYOUTS = ("en-US", "en-GB")
+SUPPORTED_OS      = ("other", "macos")
 
 SCAN_TIMEOUT = 15.0   # seconds to wait while scanning
 CHUNK_SIZE   = 512    # max bytes per BLE write (must be ≤ negotiated MTU − 3)
@@ -37,6 +49,18 @@ async def find_device():
         )
     print(f"[BLE] Found: {device.name}  ({device.address})")
     return device
+
+
+async def set_layout(client: BleakClient, layout: str) -> None:
+    """Tell the ESP32 which keyboard layout the host is using."""
+    await client.write_gatt_char(LAYOUT_CHAR_UUID, layout.encode(), response=True)
+    print(f"[BLE] Layout set to: {layout}")
+
+
+async def set_os(client: BleakClient, os: str) -> None:
+    """Tell the ESP32 which OS the target machine is running."""
+    await client.write_gatt_char(OS_CHAR_UUID, os.encode(), response=True)
+    print(f"[BLE] OS set to: {os}")
 
 
 async def send_string(client: BleakClient, text: str) -> None:
@@ -63,11 +87,14 @@ async def interactive_mode(client: BleakClient) -> None:
         await send_string(client, text)
 
 
-async def main(one_shot_text: str | None = None) -> None:
+async def main(one_shot_text: str | None = None, layout: str = "en-US", os: str = "other") -> None:
     device = await find_device()
 
     async with BleakClient(device) as client:
         print(f"[BLE] Connected  (MTU: {client.mtu_size} bytes)")
+
+        await set_layout(client, layout)
+        await set_os(client, os)
 
         if one_shot_text is not None:
             await send_string(client, one_shot_text)
@@ -78,9 +105,28 @@ async def main(one_shot_text: str | None = None) -> None:
 
 
 if __name__ == "__main__":
-    arg_text = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else None
+    parser = argparse.ArgumentParser(description="Send text to ESP32 BLE keyboard bridge.")
+    parser.add_argument(
+        "--layout",
+        default="en-US",
+        choices=SUPPORTED_LAYOUTS,
+        help="Keyboard layout of the target machine (default: en-US)",
+    )
+    parser.add_argument(
+        "--os",
+        default="other",
+        choices=SUPPORTED_OS,
+        help="OS of the target machine: 'macos' or 'other' (Win/Linux/Android) (default: other)",
+    )
+    parser.add_argument(
+        "text",
+        nargs="*",
+        help="Text to send (omit for interactive mode)",
+    )
+    args = parser.parse_args()
+    one_shot = " ".join(args.text) if args.text else None
     try:
-        asyncio.run(main(one_shot_text=arg_text))
+        asyncio.run(main(one_shot_text=one_shot, layout=args.layout, os=args.os))
     except RuntimeError as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         sys.exit(1)
