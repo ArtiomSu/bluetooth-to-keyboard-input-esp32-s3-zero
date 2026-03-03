@@ -26,6 +26,16 @@
 #include <BLE2902.h>
 #include "keytypes.h"
 
+// mbedTLS — bundled with ESP32 Arduino core via ESP-IDF
+#include <mbedtls/ecdh.h>
+#include <mbedtls/gcm.h>
+#include <mbedtls/md.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/ctr_drbg.h>
+
+// ESP-IDF system — for esp_restart() used in fatal crypto error handling
+#include <esp_system.h>
+
 // ── BLE identifiers ──────────────────────────────────────────────────────────
 // Keep these in sync with the macOS script.
 #define DEVICE_NAME             "ESP32-KB"
@@ -33,14 +43,33 @@
 #define CHARACTERISTIC_UUID     "12340001-1234-1234-1234-123456789abc"
 #define LAYOUT_CHAR_UUID        "12340002-1234-1234-1234-123456789abc"  // write "en-US" or "en-GB"
 #define OS_CHAR_UUID            "12340003-1234-1234-1234-123456789abc"  // write "macos" or "other"
+#define PUBKEY_CHAR_UUID        "12340004-1234-1234-1234-123456789abc"  // read: ESP32's 32-byte X25519 public key
+#define PUBKEY_SIG_CHAR_UUID    "12340005-1234-1234-1234-123456789abc"  // read: HMAC-SHA256(PSK, pubkey)
+
+// Encrypted packet layout: [32 mac_pubkey][12 nonce][ciphertext][16 GCM tag]
+#define CRYPTO_OVERHEAD 60   // 32 + 12 + 16
+
+// ── Pre-shared key for public-key authentication ──────────────────────────────
+// Both sides must have the same bytes. Generate your own and keep it secret:
+//   python3 -c "import os; print(os.urandom(32).hex())"
+// Then update PSK here AND PSK in send_ble.py.
+static const uint8_t PSK[32] = {
+    0xa3, 0xf1, 0xc8, 0xe2, 0xb5, 0xd4, 0x07, 0x96,
+    0x12, 0xfe, 0x3a, 0x8b, 0xc9, 0xe0, 0x5d, 0x7f,
+    0x41, 0x62, 0xab, 0x90, 0xc8, 0xe3, 0xd5, 0xf6,
+    0x17, 0x28, 0x4a, 0x9b, 0x3c, 0x06, 0xe1, 0xf2
+};
 
 // ── Globals ───────────────────────────────────────────────────────────────────
 USBHIDKeyboard Keyboard;
 
-// Shared ring-buffer between BLE callback (ISR-like context) and loop()
+// Shared ring-buffer between BLE callback (core 0) and loop() (core 1).
+// portMUX_TYPE + taskENTER/EXIT_CRITICAL coordinate across both cores;
+// noInterrupts()/interrupts() only mask the *calling* core and are insufficient.
 #define QUEUE_SIZE 8
 #define MAX_STR    512
 
+static portMUX_TYPE queueMux = portMUX_INITIALIZER_UNLOCKED;
 static char     queue[QUEUE_SIZE][MAX_STR];
 static uint8_t  qHead = 0, qTail = 0;
 static volatile bool qFull = false;
@@ -51,6 +80,24 @@ inline bool queueEmpty() { return (qHead == qTail) && !qFull; }
 static volatile KeyLayout activeLayout = LAYOUT_US;
 // Active target OS (set via BLE OS characteristic)
 static volatile KeyOS activeOS = OS_OTHER;
+
+// ── App-layer crypto state (X25519 + AES-256-GCM) ────────────────────────────
+static mbedtls_ecp_group        ecGroup;   // Curve25519 group parameters
+static mbedtls_mpi              ecPrivKey; // our private scalar
+static mbedtls_ecp_point        ecPubKeyPt;// our public point
+static mbedtls_ctr_drbg_context ctr_drbg;
+static mbedtls_entropy_context  ecEntropy;
+static uint8_t                  ecPubKeyBytes[32];  // our X25519 public key (32 raw bytes)
+static uint8_t                  ecPubKeySig[32];    // HMAC-SHA256(PSK, ecPubKeyBytes)
+
+// Global pointers to the pubkey characteristics so onConnect() can update them.
+// Set once in setup() after the characteristics are created.
+static BLECharacteristic *gPubKeyChar    = nullptr;
+static BLECharacteristic *gPubKeySigChar = nullptr;
+
+// Replay-attack counter: reset to 0 on every new connection.
+// Each decrypted packet must carry a strictly increasing value.
+static volatile uint32_t lastSeenCounter = 0;
 
 // ── Layout / keycode tables ───────────────────────────────────────────────────
 // Raw HID usage codes (physical key positions, layout-independent)
@@ -229,11 +276,194 @@ static void typeString(const char *str) {
     }
 }
 
+// ── Crypto helpers ───────────────────────────────────────────────────────────
+
+/**
+ * Generate a fresh X25519 keypair and recompute the HMAC signature.
+ * Called once at boot and again on every new BLE connection, so each
+ * session uses a unique private key (forward secrecy per connection).
+ */
+static void regenKeypair() {
+    // Generate a fresh X25519 keypair. Any failure here is fatal: the device
+    // cannot operate safely without a valid keypair, so restart immediately.
+    int ret = mbedtls_ecp_gen_keypair(&ecGroup, &ecPrivKey, &ecPubKeyPt,
+                                       mbedtls_ctr_drbg_random, &ctr_drbg);
+    if (ret != 0) {
+        // RNG failure or curve not initialised — cannot produce a safe key.
+        esp_restart();
+    }
+
+    size_t pubOutLen = 0;
+    ret = mbedtls_ecp_point_write_binary(&ecGroup, &ecPubKeyPt, MBEDTLS_ECP_PF_COMPRESSED,
+                                          &pubOutLen, ecPubKeyBytes, sizeof(ecPubKeyBytes));
+    if (ret != 0 || pubOutLen != 32) {
+        // Curve25519 u-coordinate must be exactly 32 bytes.
+        esp_restart();
+    }
+
+    // ecPubKeySig = HMAC-SHA256(PSK, ecPubKeyBytes)
+    const mbedtls_md_info_t *mdInfo = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    mbedtls_md_context_t mdCtx;
+    mbedtls_md_init(&mdCtx);
+    ret = mbedtls_md_setup(&mdCtx, mdInfo, 1 /* HMAC */);
+    if (ret != 0) { mbedtls_md_free(&mdCtx); esp_restart(); }
+    ret = mbedtls_md_hmac_starts(&mdCtx, PSK, sizeof(PSK));
+    if (ret != 0) { mbedtls_md_free(&mdCtx); esp_restart(); }
+    ret = mbedtls_md_hmac_update(&mdCtx, ecPubKeyBytes, 32);
+    if (ret != 0) { mbedtls_md_free(&mdCtx); esp_restart(); }
+    ret = mbedtls_md_hmac_finish(&mdCtx, ecPubKeySig);
+    mbedtls_md_free(&mdCtx);
+    if (ret != 0) { esp_restart(); }
+
+    // Update BLE characteristics if they have been created already
+    if (gPubKeyChar)    gPubKeyChar->setValue(ecPubKeyBytes, 32);
+    if (gPubKeySigChar) gPubKeySigChar->setValue(ecPubKeySig, 32);
+}
+
+/**
+ * Verify a PSK-HMAC-authenticated write.
+ * Expected write format: [32-byte HMAC-SHA256(PSK, value)][value]
+ * Returns a pointer to the value (data+32) on success, nullptr on failure.
+ * *valueLen is set to the value length on success.
+ */
+static const uint8_t *verifyPskHmac(const uint8_t *data, size_t dataLen, size_t *valueLen) {
+    if (dataLen <= 32) return nullptr;
+    const uint8_t *mac   = data;
+    const uint8_t *value = data + 32;
+    *valueLen = dataLen - 32;
+
+    uint8_t expected[32];
+    const mbedtls_md_info_t *mdInfo = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    mbedtls_md_context_t ctx;
+    mbedtls_md_init(&ctx);
+    mbedtls_md_setup(&ctx, mdInfo, 1 /* HMAC */);
+    mbedtls_md_hmac_starts(&ctx, PSK, sizeof(PSK));
+    mbedtls_md_hmac_update(&ctx, value, *valueLen);
+    mbedtls_md_hmac_finish(&ctx, expected);
+    mbedtls_md_free(&ctx);
+
+    // Constant-time comparison to prevent timing attacks
+    uint8_t diff = 0;
+    for (int i = 0; i < 32; i++) diff |= (mac[i] ^ expected[i]);
+    return (diff == 0) ? value : nullptr;
+}
+
+/**
+ * Minimal HKDF-SHA256 (RFC 5869) with no salt and no info, output 32 bytes.
+ * Compatible with Python's cryptography.hazmat HKDF(SHA256, length=32, salt=None, info=b"").
+ */
+static void hkdfSha256(const uint8_t *ikm, size_t ikm_len, uint8_t out[32]) {
+    const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    mbedtls_md_context_t ctx;
+    mbedtls_md_init(&ctx);
+    mbedtls_md_setup(&ctx, info, 1 /* HMAC */);
+
+    // Extract: PRK = HMAC-SHA256(salt=0x00*32, IKM)
+    uint8_t salt[32] = {};
+    uint8_t prk[32];
+    mbedtls_md_hmac_starts(&ctx, salt, sizeof(salt));
+    mbedtls_md_hmac_update(&ctx, ikm, ikm_len);
+    mbedtls_md_hmac_finish(&ctx, prk);
+
+    // Expand: OKM = HMAC-SHA256(PRK, 0x01)  [single block, 32 bytes]
+    uint8_t ctr = 0x01;
+    mbedtls_md_hmac_starts(&ctx, prk, 32);
+    mbedtls_md_hmac_update(&ctx, &ctr, 1);
+    mbedtls_md_hmac_finish(&ctx, out);
+    memset(prk, 0, sizeof(prk));  // PRK is derived secret — zero after expansion
+
+    mbedtls_md_free(&ctx);
+}
+
+/**
+ * Decrypt an ECIES packet written to the text characteristic.
+ * Packet layout: [32 mac_pubkey][12 nonce][ciphertext][16 GCM tag]
+ * Plaintext layout: [4-byte big-endian counter][UTF-8 text]
+ * Returns true and fills out/outLen (text only, counter stripped) on success.
+ * Returns false on bad length, wrong GCM tag, or replay (counter ≤ last seen).
+ */
+static bool decryptPayload(const uint8_t *pkt, size_t pktLen, char *out, size_t &outLen) {
+    if (pktLen < (size_t)CRYPTO_OVERHEAD + 4) return false;  // need at least counter
+    size_t cipherLen = pktLen - CRYPTO_OVERHEAD;
+    // cipherLen bytes of plaintext + 1 null byte must fit in MAX_STR.
+    // Using > MAX_STR - 1 makes the intent explicit: reject anything that won't fit.
+    if (cipherLen > MAX_STR - 1) return false;
+
+    const uint8_t *macPubBytes = pkt;
+    const uint8_t *nonce       = pkt + 32;
+    const uint8_t *ciphertext  = pkt + 44;
+    const uint8_t *tag         = pkt + pktLen - 16;
+
+    // 1. Parse sender's ephemeral public key from raw 32-byte X coordinate
+    mbedtls_ecp_point peerPub;
+    mbedtls_mpi       sharedMpi;
+    mbedtls_ecp_point_init(&peerPub);
+    mbedtls_mpi_init(&sharedMpi);
+    // Curve25519 point is encoded as just the 32-byte u-coordinate
+    int ret = mbedtls_ecp_point_read_binary(&ecGroup, &peerPub, macPubBytes, 32);
+    if (ret != 0) { mbedtls_ecp_point_free(&peerPub); mbedtls_mpi_free(&sharedMpi); return false; }
+
+    // 2. ECDH: shared secret = ecPrivKey * peerPub  (result is the u-coordinate)
+    ret = mbedtls_ecdh_compute_shared(&ecGroup, &sharedMpi, &peerPub, &ecPrivKey,
+                                       mbedtls_ctr_drbg_random, &ctr_drbg);
+    mbedtls_ecp_point_free(&peerPub);
+    if (ret != 0) { mbedtls_mpi_free(&sharedMpi); return false; }
+
+    uint8_t sharedBytes[32] = {};
+    mbedtls_mpi_write_binary(&sharedMpi, sharedBytes, 32);
+    mbedtls_mpi_free(&sharedMpi);
+    // mbedTLS writes MPIs in big-endian; X25519 (RFC 7748) is little-endian.
+    // Reverse so the shared secret matches Python's exchange() output.
+    for (int i = 0; i < 16; i++) {
+        uint8_t tmp = sharedBytes[i];
+        sharedBytes[i] = sharedBytes[31 - i];
+        sharedBytes[31 - i] = tmp;
+    }
+
+    // 3. HKDF-SHA256 → 32-byte AES key
+    uint8_t aesKey[32];
+    hkdfSha256(sharedBytes, 32, aesKey);
+    memset(sharedBytes, 0, sizeof(sharedBytes));  // ECDH shared secret no longer needed
+
+    // 4. AES-256-GCM decrypt + verify authentication tag
+    mbedtls_gcm_context gcm;
+    mbedtls_gcm_init(&gcm);
+    mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, aesKey, 256);
+    ret = mbedtls_gcm_auth_decrypt(&gcm, cipherLen,
+                                    nonce, 12,
+                                    nullptr, 0,
+                                    tag, 16,
+                                    ciphertext, (uint8_t *)out);
+    mbedtls_gcm_free(&gcm);
+    memset(aesKey, 0, sizeof(aesKey));  // AES key no longer needed — zero before any return
+    if (ret != 0) return false;
+
+    out[cipherLen] = '\0';
+
+    // 5. Replay check: extract big-endian counter from first 4 bytes of plaintext
+    if (cipherLen < 4) return false;
+    uint32_t counter = ((uint32_t)(uint8_t)out[0] << 24)
+                     | ((uint32_t)(uint8_t)out[1] << 16)
+                     | ((uint32_t)(uint8_t)out[2] <<  8)
+                     | ((uint32_t)(uint8_t)out[3]);
+    if (counter <= lastSeenCounter) return false;  // replay or out-of-order — drop
+    lastSeenCounter = counter;
+
+    // Strip the 4-byte counter prefix — caller gets only the text
+    outLen = cipherLen - 4;
+    memmove(out, out + 4, outLen + 1);  // includes null terminator
+    return true;
+}
+
 // ── BLE OS characteristic callback ──────────────────────────────────────────
 class OSCallbacks : public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pChar) override {
-        String val = pChar->getValue();
-        if (val.length() == 0) return;
+        String raw = pChar->getValue();
+        size_t valueLen = 0;
+        const uint8_t *value = verifyPskHmac(
+            (const uint8_t *)raw.c_str(), raw.length(), &valueLen);
+        if (!value) return;  // bad HMAC — drop
+        String val((const char *)value, valueLen);
         activeOS = (val == "macos") ? OS_MACOS : OS_OTHER;
     }
 };
@@ -241,13 +471,13 @@ class OSCallbacks : public BLECharacteristicCallbacks {
 // ── BLE layout characteristic callback ───────────────────────────────────────
 class LayoutCallbacks : public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pChar) override {
-        String val = pChar->getValue();
-        if (val.length() == 0) return;
-        if (val == "en-GB") {
-            activeLayout = LAYOUT_GB;
-        } else {
-            activeLayout = LAYOUT_US;  // default / fallback
-        }
+        String raw = pChar->getValue();
+        size_t valueLen = 0;
+        const uint8_t *value = verifyPskHmac(
+            (const uint8_t *)raw.c_str(), raw.length(), &valueLen);
+        if (!value) return;  // bad HMAC — drop
+        String val((const char *)value, valueLen);
+        activeLayout = (val == "en-GB") ? LAYOUT_GB : LAYOUT_US;
     }
 };
 
@@ -255,26 +485,35 @@ class LayoutCallbacks : public BLECharacteristicCallbacks {
 class CharacteristicCallbacks : public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pChar) override {
         String val = pChar->getValue();
-        if (val.length() == 0) return;
+        if ((size_t)val.length() < (size_t)CRYPTO_OVERHEAD) return;
 
-        size_t len = min((size_t)val.length(), (size_t)(MAX_STR - 1));
+        // Decrypt ECIES packet → plaintext
+        char plaintext[MAX_STR];
+        size_t plainLen = 0;
+        if (!decryptPayload((const uint8_t *)val.c_str(), val.length(), plaintext, plainLen)) {
+            return;  // bad tag or malformed — drop silently
+        }
+        if (plainLen == 0) return;
 
-        noInterrupts();
+        taskENTER_CRITICAL(&queueMux);
         if (!qFull) {
-            memcpy(queue[qTail], val.c_str(), len);
-            queue[qTail][len] = '\0';
+            memcpy(queue[qTail], plaintext, plainLen + 1);
             qTail = (qTail + 1) % QUEUE_SIZE;
             if (qTail == qHead) qFull = true;
         }
         // if qFull, drop silently — consumer is too slow
-        interrupts();
+        taskEXIT_CRITICAL(&queueMux);
     }
 };
 
-// ── BLE server callbacks (optional: track connection state) ───────────────────
+// ── BLE server callbacks ──────────────────────────────────────────────────────
 class ServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer *pServer) override {
-        // Optionally blink LED or log
+        // Fresh keypair for every connection — renders captured traffic from
+        // previous sessions undecryptable even if the old private key leaks.
+        regenKeypair();
+        // Reset replay counter so the new session starts fresh at 1
+        lastSeenCounter = 0;
     }
     void onDisconnect(BLEServer *pServer) override {
         // Restart advertising so the host can reconnect
@@ -292,6 +531,16 @@ void setup() {
     BLEDevice::init(DEVICE_NAME);
     BLEDevice::setMTU(517);  // request large MTU for longer strings
 
+    // --- App-layer crypto: initialise RNG + Curve25519 group ---
+    mbedtls_entropy_init(&ecEntropy);
+    mbedtls_ctr_drbg_init(&ctr_drbg);
+    mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &ecEntropy, nullptr, 0);
+    mbedtls_ecp_group_init(&ecGroup);
+    mbedtls_mpi_init(&ecPrivKey);
+    mbedtls_ecp_point_init(&ecPubKeyPt);
+    mbedtls_ecp_group_load(&ecGroup, MBEDTLS_ECP_DP_CURVE25519);
+    regenKeypair();  // generate first keypair (characteristics not yet created; ptrs are null)
+
     BLEServer *pServer = BLEDevice::createServer();
     pServer->setCallbacks(new ServerCallbacks());
 
@@ -303,6 +552,22 @@ void setup() {
         BLECharacteristic::PROPERTY_WRITE_NR     // write without response (faster)
     );
     pChar->setCallbacks(new CharacteristicCallbacks());
+
+    // Public-key characteristic: read-only, exposes ESP32's X25519 public key (32 bytes)
+    BLECharacteristic *pPubKey = pService->createCharacteristic(
+        PUBKEY_CHAR_UUID,
+        BLECharacteristic::PROPERTY_READ
+    );
+    pPubKey->setValue(ecPubKeyBytes, 32);
+    gPubKeyChar = pPubKey;  // store so onConnect() can update it
+
+    // Public-key signature: HMAC-SHA256(PSK, pubkey) — lets clients verify the key is genuine
+    BLECharacteristic *pPubKeySig = pService->createCharacteristic(
+        PUBKEY_SIG_CHAR_UUID,
+        BLECharacteristic::PROPERTY_READ
+    );
+    pPubKeySig->setValue(ecPubKeySig, 32);
+    gPubKeySigChar = pPubKeySig;  // store so onConnect() can update it
 
     // Layout characteristic — write "en-US" or "en-GB" to switch layout
     BLECharacteristic *pLayout = pService->createCharacteristic(
@@ -337,7 +602,7 @@ void setup() {
 void loop() {
     // Drain the queue and type each pending string
     while (true) {
-        noInterrupts();
+        taskENTER_CRITICAL(&queueMux);
         bool empty = queueEmpty();
         char buf[MAX_STR];
         if (!empty) {
@@ -345,7 +610,7 @@ void loop() {
             qHead = (qHead + 1) % QUEUE_SIZE;
             qFull = false;
         }
-        interrupts();
+        taskEXIT_CRITICAL(&queueMux);
 
         if (empty) break;
         typeString(buf);
