@@ -50,6 +50,7 @@ OS_CHAR_UUID        = "12340003-1234-1234-1234-123456789abc"
 PUBKEY_CHAR_UUID    = "12340004-1234-1234-1234-123456789abc"  # read: ESP32's 32-byte X25519 pubkey
 PUBKEY_SIG_CHAR_UUID = "12340005-1234-1234-1234-123456789abc" # read: HMAC-SHA256(PSK, pubkey)
 READY_CHAR_UUID     = "12340006-1234-1234-1234-123456789abc"  # read: 0x01=ready, 0x00=busy typing
+DELAY_CHAR_UUID     = "12340007-1234-1234-1234-123456789abc"  # write: [uint16 minMs BE][uint16 maxMs BE]
 
 # ── Pre-shared key for public-key authentication ──────────────────────────────
 # Must match PSK[] in firmware.ino exactly.
@@ -223,6 +224,21 @@ async def set_os(client: BleakClient, target_os: str) -> None:
     print(f"[BLE] OS set to: {target_os}")
 
 
+async def set_delay(client: BleakClient, min_ms: int, max_ms: int) -> None:
+    """Set the per-keystroke delay range on the ESP32.
+
+    When min_ms == max_ms every keystroke uses that fixed delay.
+    When they differ, the firmware picks a random delay in [min_ms, max_ms] ms
+    for each keystroke using its hardware RNG.
+    """
+    value = struct.pack(">HH", min_ms, max_ms)
+    await client.write_gatt_char(DELAY_CHAR_UUID, hmac_wrap(value), response=True)
+    if min_ms == max_ms:
+        print(f"[BLE] Keystroke delay set to: {min_ms} ms")
+    else:
+        print(f"[BLE] Keystroke delay set to: {min_ms}\u2013{max_ms} ms (random per keystroke)")
+
+
 def _utf8_chunks(data: bytes, max_bytes: int):
     """Split UTF-8 encoded bytes into chunks of ≤ max_bytes without splitting codepoints."""
     start = 0
@@ -295,7 +311,7 @@ async def interactive_mode(client: BleakClient, esp32_pubkey: bytes, enter: bool
         await send_string(client, text, esp32_pubkey)
 
 
-async def main(one_shot_text: str | None = None, layout: str = "en-US", target_os: str = "other", enter: bool = False) -> None:
+async def main(one_shot_text: str | None = None, layout: str = "en-US", target_os: str = "other", enter: bool = False, min_delay: int = 20, max_delay: int = 20) -> None:
     device = await find_device()
     _reset_counter()  # fresh counter for every new connection
 
@@ -316,6 +332,7 @@ async def main(one_shot_text: str | None = None, layout: str = "en-US", target_o
 
         await set_layout(client, layout)
         await set_os(client, target_os)
+        await set_delay(client, min_delay, max_delay)
 
         if one_shot_text is not None:
             text = one_shot_text + ("\n" if enter else "")
@@ -346,14 +363,33 @@ if __name__ == "__main__":
         help="Press Enter after sending the text",
     )
     parser.add_argument(
+        "--min-delay",
+        type=int,
+        default=20,
+        metavar="MS",
+        help="Minimum per-keystroke delay in ms (default: 20)",
+    )
+    parser.add_argument(
+        "--max-delay",
+        type=int,
+        default=20,
+        metavar="MS",
+        help="Maximum per-keystroke delay in ms (default: 20). "
+             "If different from --min-delay, each keystroke uses a random delay in that range.",
+    )
+    parser.add_argument(
         "text",
         nargs="*",
         help="Text to send (omit for interactive mode)",
     )
     args = parser.parse_args()
     one_shot = " ".join(args.text) if args.text else None
+    if args.min_delay < 0 or args.max_delay < 0:
+        parser.error("--min-delay and --max-delay must be non-negative")
+    if args.min_delay > args.max_delay:
+        parser.error("--min-delay must be ≤ --max-delay")
     try:
-        asyncio.run(main(one_shot_text=one_shot, layout=args.layout, target_os=args.os, enter=args.enter))
+        asyncio.run(main(one_shot_text=one_shot, layout=args.layout, target_os=args.os, enter=args.enter, min_delay=args.min_delay, max_delay=args.max_delay))
     except RuntimeError as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         sys.exit(1)

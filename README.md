@@ -133,8 +133,8 @@ Two flags control how symbols are typed. Set them to match the **target machine*
 |------|---------|---------|---------|
 | `--layout` | `en-US`, `en-GB` | `en-US` | Keyboard input source / locale |
 | `--os` | `other`, `macos` | `other` | OS of the target machine |
-| `--enter` | *(flag, no value)* | off | Press Enter after the text |
-
+| `--enter` | *(flag, no value)* | off | Press Enter after the text || `--min-delay` | integer ms | `20` | Minimum per-keystroke delay |
+| `--max-delay` | integer ms | `20` | Maximum per-keystroke delay — if different from `--min-delay`, each keystroke uses a random delay in that range |
 > **`--os macos`** is needed when the target is a Mac running the British layout,
 > because macOS uses **Option+3** for `#` whereas Windows/Linux/Android use a
 > dedicated ISO key (HID 0x32).
@@ -152,6 +152,9 @@ python send_ble.py --layout en-GB --os macos --enter 'Hello, World *###£$@'
 
 # UK layout on Windows / Linux
 python send_ble.py --layout en-GB --os other 'Hello, World *###£$@'
+
+# Random per-keystroke delay between 50 and 150 ms (mimics human typing speed)
+python send_ble.py --min-delay 50 --max-delay 150 "Hello, World!"
 ```
 
 Long strings are automatically split into chunks of up to 448 bytes and sent
@@ -221,6 +224,7 @@ The ESP32 exposes six characteristics under service `12340000-1234-1234-1234-123
 | `...0004...` | read | ESP32's ephemeral X25519 public key (32 bytes) |
 | `...0005...` | read | `HMAC-SHA256(PSK, pubkey)` — proves the key is genuine |
 | `...0006...` | read/notify | Chunk-completion counter — firmware notifies after each chunk is typed |
+| `...0007...` | write | Keystroke delay — `[uint16 minMs][uint16 maxMs]` big-endian (HMAC-authenticated); each keystroke uses a random delay drawn from this range |
 
 ### Connection flow
 

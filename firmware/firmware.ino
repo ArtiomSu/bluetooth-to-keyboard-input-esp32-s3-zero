@@ -50,6 +50,7 @@
 #define PUBKEY_CHAR_UUID        "12340004-1234-1234-1234-123456789abc"  // read: ESP32's 32-byte X25519 public key
 #define PUBKEY_SIG_CHAR_UUID    "12340005-1234-1234-1234-123456789abc"  // read: HMAC-SHA256(PSK, pubkey)
 #define READY_CHAR_UUID         "12340006-1234-1234-1234-123456789abc"  // read: 0x01=ready to receive, 0x00=busy typing
+#define DELAY_CHAR_UUID         "12340007-1234-1234-1234-123456789abc"  // write: [uint16 minDelay][uint16 maxDelay] big-endian, in ms
 
 // Encrypted packet layout: [32 mac_pubkey][12 nonce][ciphertext][16 GCM tag]
 #define CRYPTO_OVERHEAD 60   // 32 + 12 + 16
@@ -122,6 +123,20 @@ static volatile uint32_t lastSeenCounter = 0;
 // Sent as the notify value so the client can distinguish "this chunk's done"
 // from a stale notification belonging to the previous chunk.
 static volatile uint8_t gCompletions = 0;
+
+// Per-keystroke delay range (milliseconds). When min == max the value is used
+// directly; when they differ, each keystroke picks a random delay in [min, max]
+// using the ESP32 hardware RNG. Default 20 ms matches previous fixed behaviour.
+static volatile uint16_t minKeystrokeDelay = 20;
+static volatile uint16_t maxKeystrokeDelay = 20;
+
+// Return a keystroke delay in ms, randomised within [min, max].
+static uint16_t keystrokeDelay() {
+    uint16_t lo = minKeystrokeDelay;
+    uint16_t hi = maxKeystrokeDelay;
+    if (lo >= hi) return lo;
+    return lo + (uint16_t)(esp_random() % ((uint32_t)(hi - lo) + 1));
+}
 
 // ── Layout / keycode tables ───────────────────────────────────────────────────
 // Raw HID usage codes (physical key positions, layout-independent)
@@ -266,7 +281,7 @@ static void pressRawKey(uint8_t hidKey, bool shift, bool alt) {
     Keyboard.pressRaw(hidKey);
     delay(5);
     Keyboard.releaseAll();
-    delay(5);
+    delay(keystrokeDelay());
 }
 
 /**
@@ -482,6 +497,22 @@ static bool decryptPayload(const uint8_t *pkt, size_t pktLen, char *out, size_t 
     return true;
 }
 
+// ── BLE delay characteristic callback ───────────────────────────────────────
+class DelayCallbacks : public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pChar) override {
+        String raw = pChar->getValue();
+        size_t valueLen = 0;
+        const uint8_t *value = verifyPskHmac(
+            (const uint8_t *)raw.c_str(), raw.length(), &valueLen);
+        if (!value || valueLen != 4) return;  // need exactly 2 × uint16 — drop
+        uint16_t minD = ((uint16_t)value[0] << 8) | value[1];  // big-endian
+        uint16_t maxD = ((uint16_t)value[2] << 8) | value[3];
+        if (minD > maxD) return;  // nonsensical range — drop
+        minKeystrokeDelay = minD;
+        maxKeystrokeDelay = maxD;
+    }
+};
+
 // ── BLE OS characteristic callback ──────────────────────────────────────────
 class OSCallbacks : public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pChar) override {
@@ -546,6 +577,20 @@ class CharacteristicCallbacks : public BLECharacteristicCallbacks {
 // ── BLE server callbacks ──────────────────────────────────────────────────────
 class ServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer *pServer) override {
+        // Stop advertising immediately so no second client can connect while
+        // this session is active. Standard BLE normally halts advertising on
+        // connection, but calling this explicitly closes the race window that
+        // exists if onDisconnect() already restarted advertising for a brief
+        // link-loss before the new connection completed.
+        BLEDevice::stopAdvertising();
+
+        // Drop any queued text from a previous session so stale chunks are
+        // not typed on behalf of the new client.
+        taskENTER_CRITICAL(&queueMux);
+        qHead = qTail = 0;
+        qFull = false;
+        taskEXIT_CRITICAL(&queueMux);
+
         // Fresh keypair for every connection — renders captured traffic from
         // previous sessions undecryptable even if the old private key leaks.
         regenKeypair();
@@ -659,6 +704,17 @@ void setup() {
     );
     pOS->setCallbacks(new OSCallbacks());
     pOS->setValue("other");  // default readable value
+
+    // Delay characteristic — write 4 bytes: [uint16 minMs BE][uint16 maxMs BE]
+    // When min == max, every keystroke uses that fixed delay.
+    // When min < max, each keystroke picks a random delay in [min, max] ms.
+    BLECharacteristic *pDelay = pService->createCharacteristic(
+        DELAY_CHAR_UUID,
+        BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_READ
+    );
+    pDelay->setCallbacks(new DelayCallbacks());
+    static const uint8_t INIT_DELAY[4] = {0x00, 0x14, 0x00, 0x14};  // 20 ms / 20 ms
+    pDelay->setValue((uint8_t *)INIT_DELAY, 4);
 
     // Ready characteristic: firmware notifies client on state change.
     // 0x01 = ready to receive next chunk; 0x00 = busy typing.
