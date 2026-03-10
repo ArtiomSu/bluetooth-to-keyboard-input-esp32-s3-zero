@@ -15,6 +15,7 @@
  * Libraries required (all available via Arduino Library Manager or bundled):
  *   - ESP32 Arduino core ≥ 2.0.14  (provides USB.h / USBHIDKeyboard.h)
  *   - ESP32 BLE Arduino             (provides BLEDevice.h etc.)
+ *   - Adafruit NeoPixel             (provides Adafruit_NeoPixel.h)
  */
 
 #include "USB.h"
@@ -36,6 +37,9 @@
 // ESP-IDF system — for esp_restart() used in fatal crypto error handling
 #include <esp_system.h>
 
+// Adafruit NeoPixel — for the onboard WS2812 RGB LED (GPIO10)
+#include <Adafruit_NeoPixel.h>
+
 // ── BLE identifiers ──────────────────────────────────────────────────────────
 // Keep these in sync with the macOS script.
 #define DEVICE_NAME             "ESP32-KB"
@@ -50,6 +54,10 @@
 // Encrypted packet layout: [32 mac_pubkey][12 nonce][ciphertext][16 GCM tag]
 #define CRYPTO_OVERHEAD 60   // 32 + 12 + 16
 
+// ── Onboard WS2812 LED ───────────────────────────────────────────────────────
+#define LED_PIN   21   // GPIO21 — onboard WS2812
+#define LED_COUNT  1
+
 // ── Pre-shared key for public-key authentication ──────────────────────────────
 // Both sides must have the same bytes. Generate your own and keep it secret:
 //   python3 -c "import os; print(os.urandom(32).hex())"
@@ -63,6 +71,15 @@ static const uint8_t PSK[32] = {
 
 // ── Globals ───────────────────────────────────────────────────────────────────
 USBHIDKeyboard Keyboard;
+
+// ── Onboard WS2812 RGB LED ───────────────────────────────────────────────────
+Adafruit_NeoPixel led(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+// LED state — idle=red blink, connected=blue blink, typing=green blink.
+// uint8_t underlying type gives single-instruction reads/writes on ESP32.
+enum LedState : uint8_t { LED_IDLE = 0, LED_CONNECTED, LED_TYPING };
+static volatile LedState ledState     = LED_IDLE;
+static volatile bool     bleConnected = false;
 
 // Shared ring-buffer between BLE callback (core 0) and loop() (core 1).
 // portMUX_TYPE + taskENTER/EXIT_CRITICAL coordinate across both cores;
@@ -532,6 +549,8 @@ class ServerCallbacks : public BLEServerCallbacks {
         // Fresh keypair for every connection — renders captured traffic from
         // previous sessions undecryptable even if the old private key leaks.
         regenKeypair();
+        bleConnected = true;
+        ledState = LED_CONNECTED;
         // Reset replay counter so the new session starts fresh at 1
         lastSeenCounter = 0;
         // Reset completion counter and signal ready for the new session.
@@ -540,13 +559,43 @@ class ServerCallbacks : public BLEServerCallbacks {
         if (gReadyChar) gReadyChar->setValue(&c0, 1);
     }
     void onDisconnect(BLEServer *pServer) override {
+        bleConnected = false;
+        ledState = LED_IDLE;
         // Restart advertising so the host can reconnect
         BLEDevice::startAdvertising();
     }
 };
 
+// ── LED task ─────────────────────────────────────────────────────────────────
+// Runs on its own FreeRTOS task so the LED keeps blinking even while
+// typeString() is blocking on per-key delays.
+static void ledTask(void *) {
+    bool on = false;
+    for (;;) {
+        on = !on;
+        uint32_t color = 0;
+        if (on) {
+            switch (ledState) {
+                case LED_IDLE:      color = led.Color(255,   0,   0); break;  // red
+                case LED_CONNECTED: color = led.Color(  0,   0, 255); break;  // blue
+                case LED_TYPING:    color = led.Color(  0, 255,   0); break;  // green
+            }
+        }
+        led.setPixelColor(0, color);
+        led.show();
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
 // ── Setup ─────────────────────────────────────────────────────────────────────
 void setup() {
+    // --- WS2812 LED ---
+    led.begin();
+    led.setBrightness(50);
+    led.clear();
+    led.show();
+    xTaskCreate(ledTask, "led", 2048, nullptr, 1, nullptr);
+
     // --- USB HID keyboard ---
     Keyboard.begin();
     USB.begin();
@@ -652,17 +701,21 @@ void loop() {
 
         if (empty) break;
         typed = true;
+        ledState = LED_TYPING;
         typeString(buf);
         delay(5);  // small gap between back-to-back sends
     }
     // Queue is now empty and all typing is done — notify client it can send next chunk.
     // Increment the completion counter so the client can distinguish this notification
     // from any stale notification belonging to the previous chunk.
-    if (typed && gReadyChar) {
-        gCompletions++;
-        uint8_t c = gCompletions;  // copy volatile before passing to setValue
-        gReadyChar->setValue(&c, 1);
-        gReadyChar->notify();
+    if (typed) {
+        ledState = bleConnected ? LED_CONNECTED : LED_IDLE;
+        if (gReadyChar) {
+            gCompletions++;
+            uint8_t c = gCompletions;  // copy volatile before passing to setValue
+            gReadyChar->setValue(&c, 1);
+            gReadyChar->notify();
+        }
     }
     delay(20);
 }

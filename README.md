@@ -49,11 +49,18 @@ bluetooth-input/
    | Partition Scheme | Default 4MB with spiffs |
    | PSRAM | Disabled |
 
-4. Open `firmware/firmware.ino`, select the correct port, and click **Upload**.
+4. Install the **Adafruit NeoPixel** library:
+   **Sketch → Include Library → Manage Libraries** → search *NeoPixel* → install
+   **Adafruit NeoPixel** by Adafruit.
+
+   The firmware drives the onboard WS2812 RGB LED on **GPIO21**. It blinks red
+   while idle, blue while a BLE client is connected, and green while typing.
+
+5. Open `firmware/firmware.ino`, select the correct port, and click **Upload**.
    > On first flash you may need to hold **BOOT** while pressing **RESET** to
    > enter download mode.
 
-5. After flashing, **unplug and replug** the USB cable. The ESP32 now enumerates
+6. After flashing, **unplug and replug** the USB cable. The ESP32 now enumerates
    as a USB HID keyboard **and** starts BLE advertising as `ESP32-KB`.
 
 ---
