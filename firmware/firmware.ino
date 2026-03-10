@@ -45,6 +45,7 @@
 #define OS_CHAR_UUID            "12340003-1234-1234-1234-123456789abc"  // write "macos" or "other"
 #define PUBKEY_CHAR_UUID        "12340004-1234-1234-1234-123456789abc"  // read: ESP32's 32-byte X25519 public key
 #define PUBKEY_SIG_CHAR_UUID    "12340005-1234-1234-1234-123456789abc"  // read: HMAC-SHA256(PSK, pubkey)
+#define READY_CHAR_UUID         "12340006-1234-1234-1234-123456789abc"  // read: 0x01=ready to receive, 0x00=busy typing
 
 // Encrypted packet layout: [32 mac_pubkey][12 nonce][ciphertext][16 GCM tag]
 #define CRYPTO_OVERHEAD 60   // 32 + 12 + 16
@@ -90,14 +91,20 @@ static mbedtls_entropy_context  ecEntropy;
 static uint8_t                  ecPubKeyBytes[32];  // our X25519 public key (32 raw bytes)
 static uint8_t                  ecPubKeySig[32];    // HMAC-SHA256(PSK, ecPubKeyBytes)
 
-// Global pointers to the pubkey characteristics so onConnect() can update them.
+// Global pointers to characteristics that are updated at runtime.
 // Set once in setup() after the characteristics are created.
 static BLECharacteristic *gPubKeyChar    = nullptr;
 static BLECharacteristic *gPubKeySigChar = nullptr;
+static BLECharacteristic *gReadyChar     = nullptr;  // 0x01=ready, 0x00=busy typing
 
 // Replay-attack counter: reset to 0 on every new connection.
 // Each decrypted packet must carry a strictly increasing value.
 static volatile uint32_t lastSeenCounter = 0;
+
+// Chunk completion counter: incremented in loop() after every chunk is fully typed.
+// Sent as the notify value so the client can distinguish "this chunk's done"
+// from a stale notification belonging to the previous chunk.
+static volatile uint8_t gCompletions = 0;
 
 // ── Layout / keycode tables ───────────────────────────────────────────────────
 // Raw HID usage codes (physical key positions, layout-independent)
@@ -179,8 +186,11 @@ static KeyEntry lookupKey(uint32_t cp, KeyLayout layout, KeyOS os) {
             case '{':  return {K_LBRACK, true,  false};
             case '|':  return {K_BSLASH, true,  false};
             case '}':  return {K_RBRACK, true,  false};
-            case '~':  return {K_NUHS,   true,  false};
+            case '~':  return (os == OS_MACOS)
+                           ? KeyEntry{K_GRAVE, true,  false}  // macOS British: Shift+` = ~
+                           : KeyEntry{K_NUHS,  true,  false}; // other: Shift+ISO key 0x32 = ~
             case 0x00A3: return {K_3,    true,  false};  // £ = Shift+3
+            case 0x20AC: return {K_2,    false, true };  // € = Alt/Option+2
             case '\n': return {0x28, false, false};
             case '\t': return {0x2B, false, false};
             default:   return {0, false, false};
@@ -495,14 +505,24 @@ class CharacteristicCallbacks : public BLECharacteristicCallbacks {
         }
         if (plainLen == 0) return;
 
+        bool queued = false;
         taskENTER_CRITICAL(&queueMux);
         if (!qFull) {
             memcpy(queue[qTail], plaintext, plainLen + 1);
             qTail = (qTail + 1) % QUEUE_SIZE;
             if (qTail == qHead) qFull = true;
+            queued = true;
         }
         // if qFull, drop silently — consumer is too slow
         taskEXIT_CRITICAL(&queueMux);
+
+        // Signal busy via notify so the client receives the state change immediately
+        // without polling. Notify is push-based and bypasses any read-cache on the host.
+        if (queued && gReadyChar) {
+            static const uint8_t BUSY = 0x00;
+            gReadyChar->setValue(&BUSY, 1);
+            gReadyChar->notify();
+        }
     }
 };
 
@@ -514,6 +534,10 @@ class ServerCallbacks : public BLEServerCallbacks {
         regenKeypair();
         // Reset replay counter so the new session starts fresh at 1
         lastSeenCounter = 0;
+        // Reset completion counter and signal ready for the new session.
+        gCompletions = 0;
+        uint8_t c0 = 0;
+        if (gReadyChar) gReadyChar->setValue(&c0, 1);
     }
     void onDisconnect(BLEServer *pServer) override {
         // Restart advertising so the host can reconnect
@@ -587,6 +611,19 @@ void setup() {
     pOS->setCallbacks(new OSCallbacks());
     pOS->setValue("other");  // default readable value
 
+    // Ready characteristic: firmware notifies client on state change.
+    // 0x01 = ready to receive next chunk; 0x00 = busy typing.
+    // PROPERTY_NOTIFY allows the firmware to push state changes instead of
+    // the client polling, which avoids BLE read-cache races on macOS.
+    BLECharacteristic *pReady = pService->createCharacteristic(
+        READY_CHAR_UUID,
+        BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+    );
+    pReady->addDescriptor(new BLE2902());  // required for notifications
+    static const uint8_t INIT_RDY = 0x01;
+    pReady->setValue(&INIT_RDY, 1);
+    gReadyChar = pReady;
+
     pService->start();
 
     // Advertise
@@ -601,6 +638,7 @@ void setup() {
 // ── Loop ──────────────────────────────────────────────────────────────────────
 void loop() {
     // Drain the queue and type each pending string
+    bool typed = false;
     while (true) {
         taskENTER_CRITICAL(&queueMux);
         bool empty = queueEmpty();
@@ -613,8 +651,18 @@ void loop() {
         taskEXIT_CRITICAL(&queueMux);
 
         if (empty) break;
+        typed = true;
         typeString(buf);
         delay(5);  // small gap between back-to-back sends
     }
-    delay(10);
+    // Queue is now empty and all typing is done — notify client it can send next chunk.
+    // Increment the completion counter so the client can distinguish this notification
+    // from any stale notification belonging to the previous chunk.
+    if (typed && gReadyChar) {
+        gCompletions++;
+        uint8_t c = gCompletions;  // copy volatile before passing to setValue
+        gReadyChar->setValue(&c, 1);
+        gReadyChar->notify();
+    }
+    delay(20);
 }

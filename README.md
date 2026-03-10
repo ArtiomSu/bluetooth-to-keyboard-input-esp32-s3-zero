@@ -1,10 +1,10 @@
-# bluetooth-input-esp32-s3
+# bluetooth-to-keyboard-input-esp32-s3-zero
 
 Send text from macOS to an **ESP32-S3 Zero** over BLE; the ESP32 types it out
 as a **USB HID keyboard** on whichever machine it is plugged into.
 
 ```
-macOS script ──BLE──► ESP32-S3 Zero ──USB HID──► any computer
+macOS script ──BLE (encrypted)──► ESP32-S3 Zero ──USB HID──► any computer
 ```
 
 ---
@@ -18,7 +18,8 @@ bluetooth-input/
 │   └── keytypes.h     ← shared types (KeyLayout, KeyOS, KeyEntry)
 └── macos/
     ├── send_ble.py    ← Python BLE client for macOS
-    └── requirements.txt
+    ├── requirements.txt
+    └── tests.sh       ← automated and manual test suite
 ```
 
 ---
@@ -79,7 +80,31 @@ After the initial flash, re-flashing is straightforward:
 
 ---
 
-## 3 — Run the macOS script
+## 3 — Change the pre-shared key (important before production use)
+
+Both sides share a 32-byte PSK used to authenticate the ESP32's public key and
+to authenticate layout/OS writes. The repository ships with a placeholder key —
+**you must replace it** before deploying.
+
+Generate a new key:
+
+```bash
+python3 -c "import os; print(os.urandom(32).hex())"
+```
+
+Update both locations with the same value:
+
+- **`firmware/firmware.ino`** — find `static const uint8_t PSK[32]` and replace
+  the byte array with your key (split the hex string into pairs, prefix each
+  with `0x`, separate with commas).
+- **`macos/send_ble.py`** — find `PSK = bytes.fromhex(...)` and replace the hex
+  string with your key.
+
+Re-flash the firmware after changing it.
+
+---
+
+## 4 — Run the macOS script
 
 ### Install dependencies
 
@@ -122,6 +147,15 @@ python send_ble.py --layout en-GB --os macos --enter 'Hello, World *###£$@'
 python send_ble.py --layout en-GB --os other 'Hello, World *###£$@'
 ```
 
+Long strings are automatically split into chunks of up to 448 bytes and sent
+sequentially. The script waits for the ESP32 to finish typing each chunk before
+sending the next, so there is no practical length limit.
+
+> **Note:** Applications that buffer a full line before processing (raw terminal
+> prompts, `cat`, etc.) may drop characters beyond their internal buffer limit
+> (~1024 chars on macOS). Use an application that reads keystrokes directly —
+> vim, a browser input field, a password prompt — and any length works fine.
+
 ### Interactive mode (keep connection open)
 
 ```bash
@@ -135,23 +169,76 @@ python send_ble.py
 Type a line and press Return to send it. Press Return on a blank line or
 Ctrl-C to disconnect.
 
+### Running the test suite
+
+`macos/tests.sh` exercises the full send path and keyboard layouts. Run it
+from the `macos/` directory (the venv must already exist — see **Install
+dependencies** above):
+
+```bash
+cd macos
+bash tests.sh
+```
+
+You will see a menu:
+
+```
+1) Automatic tests (448 and 896 chars)
+2) Manual tests (1344 and 5000 chars)
+3) Full UK keyboard test (make sure you have the UK layout set in your OS)
+4) Full US keyboard test (make sure you have the US layout set in your OS)
+```
+
+**Automatic tests (options 1, 3, 4)** send text via BLE and confirm the
+received characters match the expected pattern via stdin — no manual steps
+required. Run them with the terminal focused.
+
+**Manual tests (option 2)** send longer strings (1 344 and 5 000 chars). They
+prompt you to open vim (`vim /tmp/t.text +startinsert`) in another terminal,
+give you 5 seconds to get ready, then send the payload. After you save and
+quit vim (`:wq`), the script reads the file back and checks it.
+
 ---
 
 ## How it works
 
-1. **BLE GATT server** — the ESP32 exposes three writable characteristics:
-   - Service UUID: `12340000-1234-1234-1234-123456789abc`
-   - Text characteristic: `12340001-1234-1234-1234-123456789abc` — string to type
-   - Layout characteristic: `12340002-1234-1234-1234-123456789abc` — `"en-US"` or `"en-GB"`
-   - OS characteristic: `12340003-1234-1234-1234-123456789abc` — `"macos"` or `"other"`
+### BLE GATT characteristics
 
-2. On connect, the macOS script writes the chosen layout and OS to their
-   respective characteristics, then writes the UTF-8-encoded text.
+The ESP32 exposes six characteristics under service `12340000-1234-1234-1234-123456789abc`:
 
-3. The ESP32 decodes the UTF-8 string codepoint by codepoint and looks each one
-   up in a layout + OS-specific HID keycode table. Each character is typed by
-   pressing the correct raw HID key with the required modifiers (Shift and/or
-   Option/Alt), so symbols are always correct on the target machine.
+| UUID suffix | Direction | Purpose |
+|-------------|-----------|---------|
+| `...0001...` | write | Encrypted text payload (ECIES) |
+| `...0002...` | write | Layout selection — `"en-US"` or `"en-GB"` (HMAC-authenticated) |
+| `...0003...` | write | OS selection — `"macos"` or `"other"` (HMAC-authenticated) |
+| `...0004...` | read | ESP32's ephemeral X25519 public key (32 bytes) |
+| `...0005...` | read | `HMAC-SHA256(PSK, pubkey)` — proves the key is genuine |
+| `...0006...` | read/notify | Chunk-completion counter — firmware notifies after each chunk is typed |
+
+### Connection flow
+
+1. Script scans for `ESP32-KB` and connects.
+2. Subscribes to BLE Notify on the ready characteristic (`...0006...`).
+3. Reads the ESP32's ephemeral X25519 public key and verifies its HMAC signature
+   against the PSK. Aborts if the signature is wrong (MITM protection).
+4. Writes the layout and OS selections (each prefixed with `HMAC-SHA256(PSK, value)`).
+5. For each chunk of text:
+   - Encrypts with ECIES: generate ephemeral X25519 keypair → ECDH → HKDF-SHA256 → AES-256-GCM.
+   - Prepends a 4-byte monotonic counter inside the ciphertext (replay attack prevention).
+   - Writes the encrypted packet to `...0001...`.
+   - Waits for the firmware to notify an incremented completion counter before
+     sending the next chunk.
+
+### Security properties
+
+| Property | Mechanism |
+|----------|-----------|
+| Confidentiality | AES-256-GCM per message |
+| Integrity / authenticity | GCM authentication tag |
+| Forward secrecy | Fresh X25519 keypair generated on every BLE connection |
+| MITM protection | `HMAC-SHA256(PSK, pubkey)` verified before trusting the key |
+| Replay attacks | Per-session monotonic counter checked by firmware; reset on reconnect |
+| Unauthenticated control writes | Layout/OS writes carry `HMAC-SHA256(PSK, value)` |
 
 ---
 
@@ -160,10 +247,12 @@ Ctrl-C to disconnect.
 | Symptom | Fix |
 |---------|-----|
 | Device not found during scan | Confirm the ESP32 is powered and the USB cable supports data (not charge-only). Check it enumerates as a keyboard in **System Information → USB**. |
+| Public key authentication FAILED | PSK mismatch — make sure `PSK` in `send_ble.py` exactly matches `PSK[32]` in `firmware.ino` and re-flash. |
 | `#` types as `£` on a Mac | Add `--os macos`; macOS uses Option+3 for `#` on the British layout. |
 | `#` types as `£` on Windows/Linux | Use `--os other` (the default); HID 0x32 produces `#` there. |
 | `@` and `"` are swapped | Make sure `--layout en-GB` is set to match the target machine's input source. |
 | `£` is skipped or missing | Use `--layout en-GB`; `£` is only in the GB keycode table. |
+| Long strings are cut off | Use vim or a browser field as the target instead of a raw terminal prompt (macOS terminal line buffer caps at ~1024 chars). |
 | macOS Bluetooth permission error | Go to **System Settings → Privacy & Security → Bluetooth** and enable access for Terminal / your app. |
 | Upload fails | Hold **BOOT** + press **RESET** to enter download mode before uploading. |
-| `write_gatt_char` raises MTU error | Reduce `CHUNK_SIZE` in `send_ble.py` to `100` and retry. |
+| Timed out waiting for firmware ready | The ESP32 is still typing the previous chunk. Increase `READY_TIMEOUT` in `send_ble.py` if sending very long strings. |

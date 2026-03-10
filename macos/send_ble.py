@@ -49,6 +49,7 @@ LAYOUT_CHAR_UUID    = "12340002-1234-1234-1234-123456789abc"
 OS_CHAR_UUID        = "12340003-1234-1234-1234-123456789abc"
 PUBKEY_CHAR_UUID    = "12340004-1234-1234-1234-123456789abc"  # read: ESP32's 32-byte X25519 pubkey
 PUBKEY_SIG_CHAR_UUID = "12340005-1234-1234-1234-123456789abc" # read: HMAC-SHA256(PSK, pubkey)
+READY_CHAR_UUID     = "12340006-1234-1234-1234-123456789abc"  # read: 0x01=ready, 0x00=busy typing
 
 # ── Pre-shared key for public-key authentication ──────────────────────────────
 # Must match PSK[] in firmware.ino exactly.
@@ -62,6 +63,7 @@ SUPPORTED_LAYOUTS = ("en-US", "en-GB")
 SUPPORTED_OS      = ("other", "macos")
 
 SCAN_TIMEOUT  = 15.0   # seconds to wait while scanning
+READY_TIMEOUT = 120.0  # max seconds to wait for firmware to finish typing
 # ECIES overhead: 32 (mac pubkey) + 12 (nonce) + 16 (GCM tag) + 4 (counter prefix) = 64
 ECIES_OVERHEAD = 64
 # Conservative upper bound assuming MTU=512. The real limit is checked at send
@@ -83,6 +85,61 @@ def _next_counter() -> int:
 def _reset_counter() -> None:
     global _send_counter
     _send_counter = 0
+
+
+# Ready-state: firmware sends a monotonically increasing completion counter after
+# each chunk is fully typed (0x01 after chunk 1, 0x02 after chunk 2, ...).
+# The 0x00 value signals busy (firmware received a chunk and is typing it).
+# Using a counter instead of a binary flag means stale notifications from a
+# previous chunk carry the old counter value and are correctly ignored.
+_last_completion: int = 0   # last completion counter received from firmware
+_notify_event: asyncio.Event | None = None  # set whenever any notify arrives
+
+
+def _on_ready_notify(sender: int, data: bytearray) -> None:
+    """Notification handler for the READY characteristic.
+
+    The firmware sends 0x00 when it starts typing a chunk, and an incrementing
+    counter value (1, 2, 3, …) when it finishes each chunk.
+    """
+    global _last_completion, _notify_event
+    if not data:
+        return
+    val = data[0]
+    if val > 0:
+        # Only advance — ignore any value ≤ last seen (handles duplicates/reorder).
+        if val > _last_completion:
+            _last_completion = val
+    # Wake up anyone waiting in wait_for_ready, they'll re-check the counter.
+    if _notify_event is not None:
+        _notify_event.set()
+
+
+async def wait_for_ready(target: int) -> None:
+    """Wait until the firmware reports it has completed *target* chunks.
+
+    The firmware sends an incrementing byte (1 after chunk 1, 2 after chunk 2,
+    …) so each notification is unique.  A stale notification from the previous
+    chunk carries a value < target and is silently ignored by the while loop.
+    """
+    global _last_completion, _notify_event
+    if _notify_event is None:
+        raise RuntimeError("Ready notifications not subscribed — call start_notify first")
+
+    deadline = asyncio.get_event_loop().time() + READY_TIMEOUT
+    while _last_completion < target:
+        _notify_event.clear()  # re-arm before the check so we don’t miss a notify
+        if _last_completion >= target:  # re-check after clear (avoid TOCTOU)
+            break
+        remaining = deadline - asyncio.get_event_loop().time()
+        if remaining <= 0:
+            raise RuntimeError(
+                f"Timed out after {READY_TIMEOUT:.0f}s waiting for firmware to finish typing chunk {target}."
+            )
+        try:
+            await asyncio.wait_for(_notify_event.wait(), timeout=min(remaining, 5.0))
+        except asyncio.TimeoutError:
+            pass  # loop back and re-check; also guards against missed notifications
 
 
 async def find_device():
@@ -166,27 +223,58 @@ async def set_os(client: BleakClient, target_os: str) -> None:
     print(f"[BLE] OS set to: {target_os}")
 
 
+def _utf8_chunks(data: bytes, max_bytes: int):
+    """Split UTF-8 encoded bytes into chunks of ≤ max_bytes without splitting codepoints."""
+    start = 0
+    while start < len(data):
+        end = start + max_bytes
+        if end >= len(data):
+            yield data[start:]
+            break
+        # Walk back to a codepoint boundary — continuation bytes are 0x80–0xBF.
+        while end > start and (data[end] & 0xC0) == 0x80:
+            end -= 1
+        if end == start:
+            raise ValueError(f"Codepoint too large to fit in chunk size {max_bytes}")
+        yield data[start:end]
+        start = end
+
+
 async def send_string(client: BleakClient, text: str, esp32_pubkey: bytes) -> None:
-    """Encrypt *text* with ECIES and send it to the ESP32."""
-    raw = text.encode("utf-8")
-    if len(raw) > MAX_PLAINTEXT:
-        raise ValueError(
-            f"Text too long ({len(raw)} bytes); max {MAX_PLAINTEXT} bytes per send "
-            f"(conservative limit; actual MTU is {client.mtu_size} bytes)."
-        )
-    packet = encrypt_payload(raw, esp32_pubkey)
-    # BLE attribute writes are capped at MTU − 3 bytes. Enforce this here before
-    # writing so we get a clear error rather than a silent rejection from the stack.
+    """Encrypt *text* with ECIES and send it to the ESP32.
+
+    Automatically splits text that exceeds the BLE MTU into multiple writes.
+    Each chunk is independently encrypted. An inter-chunk delay is added so the
+    firmware has time to type the previous chunk before the next one arrives
+    (each keypress takes ~10 ms on the firmware side).
+    """
     max_write = client.mtu_size - 3
-    if len(packet) > max_write:
-        raise ValueError(
-            f"Encrypted packet ({len(packet)} B) exceeds negotiated MTU write limit "
-            f"({max_write} B = MTU {client.mtu_size} − 3). "
-            f"Shorten the text (max ~{max_write - ECIES_OVERHEAD} bytes) or "
-            "ensure a larger MTU is negotiated."
-        )
-    await client.write_gatt_char(CHARACTERISTIC_UUID, packet, response=True)
-    print(f"[BLE] Sent ({len(raw)} B plaintext → {len(packet)} B encrypted, MTU limit {max_write} B): {text!r}")
+    max_plain = min(MAX_PLAINTEXT, max_write - ECIES_OVERHEAD)
+    if max_plain <= 0:
+        raise ValueError(f"Negotiated MTU ({client.mtu_size}) is too small to send encrypted data.")
+
+    raw = text.encode("utf-8")
+    chunks = list(_utf8_chunks(raw, max_plain))
+    total = len(chunks)
+
+    global _last_completion
+    baseline = _last_completion  # snapshot before first chunk
+
+    for i, chunk in enumerate(chunks):
+        target_completion = baseline + i + 1  # this chunk must be the (target)th completed
+        if _notify_event is not None:
+            _notify_event.clear()  # arm before write so we don’t miss the 0x00
+        packet = encrypt_payload(chunk, esp32_pubkey)
+        await client.write_gatt_char(CHARACTERISTIC_UUID, packet, response=True)
+        if total > 1:
+            print(f"[BLE] Chunk {i + 1}/{total} ({len(chunk)} B plaintext \u2192 {len(packet)} B encrypted)")
+        # Wait for the firmware to finish typing before sending the next chunk
+        # or (for the last chunk) before disconnecting.
+        await wait_for_ready(target_completion)
+
+    label = f"{len(raw)} B in {total} chunk{'s' if total > 1 else ''}"
+    #print(f"[BLE] Sent {label} (MTU {client.mtu_size} B, {max_plain} B/chunk): {text!r}")
+    print(f"[BLE] Sent {label} (MTU {client.mtu_size} B, {max_plain} B/chunk)")
 
 
 async def interactive_mode(client: BleakClient, esp32_pubkey: bytes, enter: bool = False) -> None:
@@ -213,6 +301,14 @@ async def main(one_shot_text: str | None = None, layout: str = "en-US", target_o
 
     async with BleakClient(device) as client:
         print(f"[BLE] Connected  (MTU: {client.mtu_size} bytes)")
+
+        # Subscribe to ready notifications before doing anything else.
+        # The firmware pushes a monotonically increasing completion counter
+        # after each chunk is fully typed.
+        global _last_completion, _notify_event
+        _last_completion = 0
+        _notify_event = asyncio.Event()
+        await client.start_notify(READY_CHAR_UUID, _on_ready_notify)
 
         # Read ESP32's ephemeral X25519 public key — used to encrypt every payload.
         # The key changes on every reboot, so forward secrecy is built in.
