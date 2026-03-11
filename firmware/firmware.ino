@@ -51,6 +51,7 @@
 #define PUBKEY_SIG_CHAR_UUID    "12340005-1234-1234-1234-123456789abc"  // read: HMAC-SHA256(PSK, pubkey)
 #define READY_CHAR_UUID         "12340006-1234-1234-1234-123456789abc"  // read: 0x01=ready to receive, 0x00=busy typing
 #define DELAY_CHAR_UUID         "12340007-1234-1234-1234-123456789abc"  // write: [uint16 minDelay][uint16 maxDelay] big-endian, in ms
+#define RAW_CHAR_UUID           "12340008-1234-1234-1234-123456789abc"  // write: encrypted raw HID event [1-byte type][optional data]
 
 // Encrypted packet layout: [32 mac_pubkey][12 nonce][ciphertext][16 GCM tag]
 #define CRYPTO_OVERHEAD 60   // 32 + 12 + 16
@@ -89,7 +90,19 @@ static volatile bool     bleConnected = false;
 #define MAX_STR    512
 
 static portMUX_TYPE queueMux = portMUX_INITIALIZER_UNLOCKED;
-static char     queue[QUEUE_SIZE][MAX_STR];
+
+// Tagged queue entries allow text, special keys, and modifier events to share
+// a single ordered queue so relative ordering is always preserved.
+enum QEntryType : uint8_t {
+    QENTRY_STRING    = 0,  // typeString(data)
+    QENTRY_KEY_TAP   = 1,  // pressRaw(data[0]) with active modifiers, then releaseAll + reapply
+    QENTRY_MOD_DOWN  = 2,  // activeModifiers |= data[0]; applyModifiers()
+    QENTRY_MOD_UP    = 3,  // activeModifiers &= ~data[0]; releaseAll; applyModifiers()
+    QENTRY_MOD_CLEAR = 4,  // activeModifiers = 0; releaseAll()
+};
+struct QEntry { QEntryType type; char data[MAX_STR]; };
+
+static QEntry   queue[QUEUE_SIZE];
 static uint8_t  qHead = 0, qTail = 0;
 static volatile bool qFull = false;
 
@@ -138,6 +151,25 @@ static uint16_t keystrokeDelay() {
     return lo + (uint16_t)(esp_random() % ((uint32_t)(hi - lo) + 1));
 }
 
+// ── Modifier state ──────────────────────────────────────────────────────────────────
+// Bitmask of script-held modifier keys. Written only by loop() (core 1) so no
+// volatile needed. Re-pressed by applyModifiers() after every key release so
+// STRING typing and KEY_TAP both see the correct modifier state.
+#define MOD_LSHIFT  0x01   // Left Shift
+#define MOD_LALT    0x02   // Left Alt
+#define MOD_LCTRL   0x04   // Left Ctrl
+#define MOD_LGUI    0x08   // Left GUI (Win / Cmd)
+#define MOD_RALT    0x10   // Right Alt (AltGr)
+static uint8_t activeModifiers = 0;
+
+static void applyModifiers() {
+    if (activeModifiers & MOD_LSHIFT) Keyboard.press(KEY_LEFT_SHIFT);
+    if (activeModifiers & MOD_LALT)   Keyboard.press(KEY_LEFT_ALT);
+    if (activeModifiers & MOD_LCTRL)  Keyboard.press(KEY_LEFT_CTRL);
+    if (activeModifiers & MOD_LGUI)   Keyboard.press(KEY_LEFT_GUI);
+    if (activeModifiers & MOD_RALT)   Keyboard.press(KEY_RIGHT_ALT);
+}
+
 // ── Layout / keycode tables ───────────────────────────────────────────────────
 // Raw HID usage codes (physical key positions, layout-independent)
 #define K_SPACE   0x2C
@@ -164,6 +196,38 @@ static uint16_t keystrokeDelay() {
 #define K_DOT     0x37
 #define K_SLASH   0x38
 #define K_NUBS    0x64   // ISO extra key: \ (unshifted) on UK layout
+// Special / navigation keys — HID usage IDs, layout-independent
+#define K_ENTER       0x28
+#define K_ESCAPE      0x29
+#define K_BACKSPACE   0x2A
+#define K_TAB         0x2B
+#define K_CAPSLOCK    0x39
+#define K_F1          0x3A
+#define K_F2          0x3B
+#define K_F3          0x3C
+#define K_F4          0x3D
+#define K_F5          0x3E
+#define K_F6          0x3F
+#define K_F7          0x40
+#define K_F8          0x41
+#define K_F9          0x42
+#define K_F10         0x43
+#define K_F11         0x44
+#define K_F12         0x45
+#define K_PRINTSCREEN 0x46
+#define K_SCROLLLOCK  0x47
+#define K_INSERT      0x49
+#define K_HOME        0x4A
+#define K_PAGEUP      0x4B
+#define K_DELETE      0x4C
+#define K_END         0x4D
+#define K_PAGEDOWN    0x4E
+#define K_RIGHT       0x4F
+#define K_LEFT        0x50
+#define K_DOWN        0x51
+#define K_UP          0x52
+#define K_NUMLOCK     0x53
+#define K_MENU        0x65
 // Letters a-z = 0x04-0x1D
 
 /**
@@ -276,12 +340,14 @@ static KeyEntry lookupKey(uint32_t cp, KeyLayout layout, KeyOS os) {
  * report, bypassing any ASCII/keycode lookup tables in the library.
  */
 static void pressRawKey(uint8_t hidKey, bool shift, bool alt) {
+    applyModifiers();          // re-press any script-held modifiers first
     if (shift) Keyboard.press(KEY_LEFT_SHIFT);
     if (alt)   Keyboard.press(KEY_LEFT_ALT);
     Keyboard.pressRaw(hidKey);
-    delay(5);
+    delay(keystrokeDelay());
     Keyboard.releaseAll();
     delay(keystrokeDelay());
+    applyModifiers();          // restore script-held modifiers after release
 }
 
 /**
@@ -556,7 +622,8 @@ class CharacteristicCallbacks : public BLECharacteristicCallbacks {
         bool queued = false;
         taskENTER_CRITICAL(&queueMux);
         if (!qFull) {
-            memcpy(queue[qTail], plaintext, plainLen + 1);
+            queue[qTail].type = QENTRY_STRING;
+            memcpy(queue[qTail].data, plaintext, plainLen + 1);
             qTail = (qTail + 1) % QUEUE_SIZE;
             if (qTail == qHead) qFull = true;
             queued = true;
@@ -566,6 +633,60 @@ class CharacteristicCallbacks : public BLECharacteristicCallbacks {
 
         // Signal busy via notify so the client receives the state change immediately
         // without polling. Notify is push-based and bypasses any read-cache on the host.
+        if (queued && gReadyChar) {
+            static const uint8_t BUSY = 0x00;
+            gReadyChar->setValue(&BUSY, 1);
+            gReadyChar->notify();
+        }
+    }
+};
+
+// ── BLE raw HID event characteristic callback ───────────────────────────────────
+class RawEventCallbacks : public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pChar) override {
+        String val = pChar->getValue();
+        if ((size_t)val.length() < (size_t)CRYPTO_OVERHEAD) return;
+
+        char plaintext[MAX_STR];
+        size_t plainLen = 0;
+        if (!decryptPayload((const uint8_t *)val.c_str(), val.length(), plaintext, plainLen)) return;
+        if (plainLen < 1) return;  // need at least the event type byte
+
+        QEntry entry;
+        uint8_t evType = (uint8_t)plaintext[0];
+        switch (evType) {
+            case 0x01:  // KEY_TAP: [type][HID keycode]
+                if (plainLen < 2) return;
+                entry.type    = QENTRY_KEY_TAP;
+                entry.data[0] = plaintext[1];
+                break;
+            case 0x02:  // MOD_DOWN: [type][modifier bitmask]
+                if (plainLen < 2) return;
+                entry.type    = QENTRY_MOD_DOWN;
+                entry.data[0] = plaintext[1];
+                break;
+            case 0x03:  // MOD_UP: [type][modifier bitmask]
+                if (plainLen < 2) return;
+                entry.type    = QENTRY_MOD_UP;
+                entry.data[0] = plaintext[1];
+                break;
+            case 0x04:  // MOD_CLEAR: [type] only
+                entry.type    = QENTRY_MOD_CLEAR;
+                entry.data[0] = 0;
+                break;
+            default: return;  // unknown event type — drop
+        }
+
+        bool queued = false;
+        taskENTER_CRITICAL(&queueMux);
+        if (!qFull) {
+            queue[qTail] = entry;
+            qTail = (qTail + 1) % QUEUE_SIZE;
+            if (qTail == qHead) qFull = true;
+            queued = true;
+        }
+        taskEXIT_CRITICAL(&queueMux);
+
         if (queued && gReadyChar) {
             static const uint8_t BUSY = 0x00;
             gReadyChar->setValue(&BUSY, 1);
@@ -590,6 +711,10 @@ class ServerCallbacks : public BLEServerCallbacks {
         qHead = qTail = 0;
         qFull = false;
         taskEXIT_CRITICAL(&queueMux);
+
+        // Release any modifier keys held from the previous session.
+        activeModifiers = 0;
+        Keyboard.releaseAll();
 
         // Fresh keypair for every connection — renders captured traffic from
         // previous sessions undecryptable even if the old private key leaks.
@@ -716,6 +841,15 @@ void setup() {
     static const uint8_t INIT_DELAY[4] = {0x00, 0x14, 0x00, 0x14};  // 20 ms / 20 ms
     pDelay->setValue((uint8_t *)INIT_DELAY, 4);
 
+    // Raw HID event characteristic — write encrypted raw key / modifier events.
+    // Payload (after ECIES decrypt + counter strip): [1-byte type][optional 1-byte data]
+    BLECharacteristic *pRaw = pService->createCharacteristic(
+        RAW_CHAR_UUID,
+        BLECharacteristic::PROPERTY_WRITE |
+        BLECharacteristic::PROPERTY_WRITE_NR
+    );
+    pRaw->setCallbacks(new RawEventCallbacks());
+
     // Ready characteristic: firmware notifies client on state change.
     // 0x01 = ready to receive next chunk; 0x00 = busy typing.
     // PROPERTY_NOTIFY allows the firmware to push state changes instead of
@@ -747,9 +881,9 @@ void loop() {
     while (true) {
         taskENTER_CRITICAL(&queueMux);
         bool empty = queueEmpty();
-        char buf[MAX_STR];
+        QEntry entry;
         if (!empty) {
-            memcpy(buf, queue[qHead], MAX_STR);
+            entry = queue[qHead];
             qHead = (qHead + 1) % QUEUE_SIZE;
             qFull = false;
         }
@@ -758,8 +892,43 @@ void loop() {
         if (empty) break;
         typed = true;
         ledState = LED_TYPING;
-        typeString(buf);
-        delay(5);  // small gap between back-to-back sends
+        switch (entry.type) {
+            case QENTRY_STRING:
+                typeString(entry.data);
+                break;
+            case QENTRY_KEY_TAP: {
+                uint8_t hidKey = (uint8_t)entry.data[0];
+                // macOS requires lock keys (CapsLock, NumLock, ScrollLock) to be
+                // held for ~150 ms before it registers the toggle.  Enforce a
+                // minimum 200 ms hold for these keys regardless of keystrokeDelay.
+                bool isLockKey = (hidKey == K_CAPSLOCK ||
+                                  hidKey == K_NUMLOCK  ||
+                                  hidKey == K_SCROLLLOCK);
+                uint32_t holdMs = keystrokeDelay();
+                if (isLockKey && holdMs < 200) holdMs = 200;
+                applyModifiers();
+                Keyboard.pressRaw(hidKey);
+                delay(holdMs);
+                Keyboard.releaseAll();
+                delay(keystrokeDelay());
+                applyModifiers();  // re-press any held modifiers after release
+                break;
+            }
+            case QENTRY_MOD_DOWN:
+                activeModifiers |= (uint8_t)entry.data[0];
+                applyModifiers();
+                break;
+            case QENTRY_MOD_UP:
+                activeModifiers &= ~(uint8_t)entry.data[0];
+                Keyboard.releaseAll();
+                applyModifiers();  // re-press remaining held modifiers
+                break;
+            case QENTRY_MOD_CLEAR:
+                activeModifiers = 0;
+                Keyboard.releaseAll();
+                break;
+        }
+        delay(5);  // small gap between back-to-back events
     }
     // Queue is now empty and all typing is done — notify client it can send next chunk.
     // Increment the completion counter so the client can distinguish this notification

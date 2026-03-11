@@ -120,12 +120,29 @@ function layout_us_macos_tests(){
     test_full_us_kb
 }
 
+function script_tests(){
+    echo "Running script tests..."
+
+    echo "Run test_script.txt? y/n"
+    read -p "Enter your choice: " choice
+    if [[ "$choice" == "y" ]]; then
+        python send_ble.py --layout "$MAIN_LAYOUT" --os "$MAIN_OS" --script test_script.txt
+    fi
+
+    echo "Run test_script_long.txt? y/n"
+    read -p "Enter your choice: " choice
+    if [[ "$choice" == "y" ]]; then
+        python send_ble.py --layout "$MAIN_LAYOUT" --os "$MAIN_OS" --script test_script_long.txt
+    fi
+}
+
 function menu() {
     echo "Select a test to run:"
     echo "1) Automatic tests (448 and 896 chars)"
     echo "2) Manual tests (1344 and 5000 chars)"
     echo "3) Full UK keyboard test (make sure you have the UK layout set in your OS)"
     echo "4) Full US keyboard test (make sure you have the US layout set in your OS)"
+    echo "5) Script tests"
     read -p "Enter your choice: " choice
 
     case $choice in
@@ -133,6 +150,7 @@ function menu() {
         2) manual_tests ;;
         3) layout_uk_macos_tests ;;
         4) layout_us_macos_tests ;;
+        5) script_tests ;;
         *) echo "Invalid choice. Please select a valid option." ;;
     esac
 }

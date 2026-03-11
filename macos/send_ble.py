@@ -51,6 +51,7 @@ PUBKEY_CHAR_UUID    = "12340004-1234-1234-1234-123456789abc"  # read: ESP32's 32
 PUBKEY_SIG_CHAR_UUID = "12340005-1234-1234-1234-123456789abc" # read: HMAC-SHA256(PSK, pubkey)
 READY_CHAR_UUID     = "12340006-1234-1234-1234-123456789abc"  # read: 0x01=ready, 0x00=busy typing
 DELAY_CHAR_UUID     = "12340007-1234-1234-1234-123456789abc"  # write: [uint16 minMs BE][uint16 maxMs BE]
+RAW_CHAR_UUID       = "12340008-1234-1234-1234-123456789abc"  # write: encrypted raw HID event
 
 # ── Pre-shared key for public-key authentication ──────────────────────────────
 # Must match PSK[] in firmware.ino exactly.
@@ -59,6 +60,49 @@ PSK = bytes.fromhex(
     "a3f1c8e2b5d4079612fe3a8bc9e05d7f"
     "4162ab90c8e3d5f617284a9b3c06e1f2"
 )
+
+# ── Modifier bitmasks — must match MOD_* defines in firmware.ino ───────────────────
+MOD_LSHIFT = 0x01   # Left Shift
+MOD_LALT   = 0x02   # Left Alt
+MOD_LCTRL  = 0x04   # Left Ctrl
+MOD_LGUI   = 0x08   # Left GUI (Win key / Cmd)
+MOD_RALT   = 0x10   # Right Alt (AltGr)
+
+MODIFIER_KEYS: dict[str, int] = {
+    "SHIFT": MOD_LSHIFT,
+    "ALT":   MOD_LALT,
+    "CTRL":  MOD_LCTRL,
+    "GUI":   MOD_LGUI,
+    "ALTGR": MOD_RALT,
+}
+
+# ── Special key HID usage IDs — must match K_* defines in firmware.ino ───────────
+SPECIAL_KEYS: dict[str, int] = {
+    "ENTER":       0x28,
+    "ESCAPE":      0x29,
+    "BACKSPACE":   0x2A,
+    "TAB":         0x2B,
+    "SPACE":       0x2C,
+    "CAPSLOCK":    0x39,
+    "F1":          0x3A,  "F2":  0x3B,  "F3":  0x3C,  "F4":  0x3D,
+    "F5":          0x3E,  "F6":  0x3F,  "F7":  0x40,  "F8":  0x41,
+    "F9":          0x42,  "F10": 0x43,  "F11": 0x44,  "F12": 0x45,
+    "PRINTSCREEN": 0x46,
+    "SCROLLLOCK":  0x47,
+    "INSERT":      0x49,
+    "HOME":        0x4A,
+    "PAGEUP":      0x4B,
+    "DELETE":      0x4C,
+    "DEL":         0x4C,
+    "END":         0x4D,
+    "PAGEDOWN":    0x4E,
+    "RIGHTARROW":  0x4F,
+    "LEFTARROW":   0x50,
+    "DOWNARROW":   0x51,
+    "UPARROW":     0x52,
+    "NUMLOCK":     0x53,
+    "MENU":        0x65,
+}
 
 SUPPORTED_LAYOUTS = ("en-US", "en-GB")
 SUPPORTED_OS      = ("other", "macos")
@@ -239,6 +283,37 @@ async def set_delay(client: BleakClient, min_ms: int, max_ms: int) -> None:
         print(f"[BLE] Keystroke delay set to: {min_ms}\u2013{max_ms} ms (random per keystroke)")
 
 
+async def _send_raw_event(client: BleakClient, event_type: int, payload: bytes, esp32_pubkey: bytes) -> None:
+    """Encrypt and send a single raw HID event; waits for the firmware to process it."""
+    global _last_completion
+    target = _last_completion + 1
+    if _notify_event is not None:
+        _notify_event.clear()
+    packet = encrypt_payload(bytes([event_type]) + payload, esp32_pubkey)
+    await client.write_gatt_char(RAW_CHAR_UUID, packet, response=True)
+    await wait_for_ready(target)
+
+
+async def send_key_tap(client: BleakClient, hid_keycode: int, esp32_pubkey: bytes) -> None:
+    """Press and release *hid_keycode* with the firmware's current active modifiers."""
+    await _send_raw_event(client, 0x01, bytes([hid_keycode]), esp32_pubkey)
+
+
+async def send_mod_down(client: BleakClient, mod_mask: int, esp32_pubkey: bytes) -> None:
+    """Hold one or more modifier keys (OR *mod_mask* into active modifiers)."""
+    await _send_raw_event(client, 0x02, bytes([mod_mask]), esp32_pubkey)
+
+
+async def send_mod_up(client: BleakClient, mod_mask: int, esp32_pubkey: bytes) -> None:
+    """Release one or more modifier keys (AND NOT *mod_mask* from active modifiers)."""
+    await _send_raw_event(client, 0x03, bytes([mod_mask]), esp32_pubkey)
+
+
+async def send_mod_clear(client: BleakClient, esp32_pubkey: bytes) -> None:
+    """Release all held modifier keys."""
+    await _send_raw_event(client, 0x04, b"", esp32_pubkey)
+
+
 def _utf8_chunks(data: bytes, max_bytes: int):
     """Split UTF-8 encoded bytes into chunks of ≤ max_bytes without splitting codepoints."""
     start = 0
@@ -311,7 +386,7 @@ async def interactive_mode(client: BleakClient, esp32_pubkey: bytes, enter: bool
         await send_string(client, text, esp32_pubkey)
 
 
-async def main(one_shot_text: str | None = None, layout: str = "en-US", target_os: str = "other", enter: bool = False, min_delay: int = 20, max_delay: int = 20) -> None:
+async def main(one_shot_text: str | None = None, layout: str = "en-US", target_os: str = "other", enter: bool = False, min_delay: int = 20, max_delay: int = 20, script_path: str | None = None) -> None:
     device = await find_device()
     _reset_counter()  # fresh counter for every new connection
 
@@ -334,7 +409,25 @@ async def main(one_shot_text: str | None = None, layout: str = "en-US", target_o
         await set_os(client, target_os)
         await set_delay(client, min_delay, max_delay)
 
-        if one_shot_text is not None:
+        if script_path is not None:
+            # Lazy import avoids a circular dependency: script_runner imports
+            # from this module, so we must not import it at the top level.
+            # When running as __main__, register ourselves under 'send_ble' so
+            # that script_runner's `from send_ble import …` gets the same module
+            # object (and the same globals, including _notify_event) rather than
+            # importing a fresh copy.
+            import sys
+            sys.modules.setdefault("send_ble", sys.modules["__main__"])
+            from script_runner import run_script, ScriptError
+            try:
+                await run_script(
+                    client, esp32_pubkey, script_path,
+                    initial_min_delay=min_delay,
+                    initial_max_delay=max_delay,
+                )
+            except ScriptError as e:
+                raise RuntimeError(str(e))
+        elif one_shot_text is not None:
             text = one_shot_text + ("\n" if enter else "")
             await send_string(client, text, esp32_pubkey)
         else:
@@ -358,9 +451,14 @@ if __name__ == "__main__":
         help="OS of the target machine: 'macos' or 'other' (Win/Linux/Android) (default: other)",
     )
     parser.add_argument(
+        "--script",
+        metavar="FILE",
+        help="Path to a ducky-script file to execute (see script.md)",
+    )
+    parser.add_argument(
         "--enter",
         action="store_true",
-        help="Press Enter after sending the text",
+        help="Press Enter after sending the text (ignored when --script is used)",
     )
     parser.add_argument(
         "--min-delay",
@@ -384,12 +482,22 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     one_shot = " ".join(args.text) if args.text else None
+    if args.script and one_shot:
+        parser.error("--script and positional text are mutually exclusive")
     if args.min_delay < 0 or args.max_delay < 0:
         parser.error("--min-delay and --max-delay must be non-negative")
     if args.min_delay > args.max_delay:
         parser.error("--min-delay must be ≤ --max-delay")
     try:
-        asyncio.run(main(one_shot_text=one_shot, layout=args.layout, target_os=args.os, enter=args.enter, min_delay=args.min_delay, max_delay=args.max_delay))
+        asyncio.run(main(
+            one_shot_text=one_shot,
+            layout=args.layout,
+            target_os=args.os,
+            enter=args.enter,
+            min_delay=args.min_delay,
+            max_delay=args.max_delay,
+            script_path=args.script,
+        ))
     except RuntimeError as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         sys.exit(1)

@@ -1,2 +1,3 @@
 macos/.venv
 .DS_Store
+macos/__pycache__

@@ -1,0 +1,54 @@
+REM go into a terminal. I'll wait for 3 seconds
+
+DELAY 3000
+
+STRINGLN cat
+
+DELAY 100
+
+STRING Hello there 
+REPEAT 3
+
+ENTER
+
+REM Now Change speed
+
+SET_MIN_DELAY 5
+SET_MAX_DELAY 10
+
+STRINGLN I can type really fast now!!! this is great
+REPEAT 2
+
+CAPSLOCK
+STRINGLN oops, I didn't mean to shout
+CAPSLOCK
+STRINGLN capslock should be off now
+
+
+CTRL_DOWN
+STRING c
+CTRL_UP
+
+DELAY 1000
+
+STRING I exited
+
+DELAY 1000
+
+BACKSPACE
+REPEAT 8
+
+REM open up finder
+
+GUI_DOWN
+CTRL_DOWN
+SHIFT_DOWN
+ALT_DOWN
+STRING d
+RELEASE_ALL
+
+DELAY 500
+STRING Opened finder
+DELAY 1000
+ESCAPE
+ESCAPE

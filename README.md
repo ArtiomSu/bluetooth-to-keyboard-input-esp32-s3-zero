@@ -7,6 +7,8 @@ as a **USB HID keyboard** on whichever machine it is plugged into.
 macOS script ──BLE (encrypted)──► ESP32-S3 Zero ──USB HID──► any computer
 ```
 
+Also supports a simple scripting language inspired by Ducky Script. See the Readme file [script.md](script.md) for details.
+
 ---
 
 ## Project layout
@@ -18,6 +20,7 @@ bluetooth-input/
 │   └── keytypes.h     ← shared types (KeyLayout, KeyOS, KeyEntry)
 └── macos/
     ├── send_ble.py    ← Python BLE client for macOS
+    ├── script_runner.py ← ducky-script parser (used by send_ble.py --script)
     ├── requirements.txt
     └── tests.sh       ← automated and manual test suite
 ```
@@ -155,6 +158,12 @@ python send_ble.py --layout en-GB --os other 'Hello, World *###£$@'
 
 # Random per-keystroke delay between 50 and 150 ms (mimics human typing speed)
 python send_ble.py --min-delay 50 --max-delay 150 "Hello, World!"
+
+# Run a ducky-script file
+python send_ble.py --script my_script.txt
+
+# Run a script with UK layout on macOS and a slow initial typing speed
+python send_ble.py --layout en-GB --os macos --min-delay 80 --max-delay 120 --script my_script.txt
 ```
 
 Long strings are automatically split into chunks of up to 448 bytes and sent
@@ -225,6 +234,7 @@ The ESP32 exposes six characteristics under service `12340000-1234-1234-1234-123
 | `...0005...` | read | `HMAC-SHA256(PSK, pubkey)` — proves the key is genuine |
 | `...0006...` | read/notify | Chunk-completion counter — firmware notifies after each chunk is typed |
 | `...0007...` | write | Keystroke delay — `[uint16 minMs][uint16 maxMs]` big-endian (HMAC-authenticated); each keystroke uses a random delay drawn from this range |
+| `...0008...` | write | Raw HID event — encrypted with ECIES; payload: `[1-byte type][optional 1-byte data]`. Types: `0x01` KEY_TAP (HID keycode), `0x02` MOD_DOWN (bitmask), `0x03` MOD_UP (bitmask), `0x04` MOD_CLEAR |
 
 ### Connection flow
 
