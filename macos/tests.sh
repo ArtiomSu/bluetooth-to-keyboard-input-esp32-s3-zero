@@ -134,6 +134,12 @@ function script_tests(){
     if [[ "$choice" == "y" ]]; then
         python send_ble.py --layout "$MAIN_LAYOUT" --os "$MAIN_OS" --script test_script_long.txt
     fi
+
+    echo "Run test_script_speed.txt? y/n"
+    read -p "Enter your choice: " choice
+    if [[ "$choice" == "y" ]]; then
+        python send_ble.py --layout "$MAIN_LAYOUT" --os "$MAIN_OS" --script test_script_speed.txt
+    fi
 }
 
 function menu() {

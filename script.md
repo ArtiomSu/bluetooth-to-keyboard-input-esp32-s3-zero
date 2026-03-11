@@ -4,6 +4,8 @@ This supports the use of duckyscript like syntax for more complex behavior.
 
 All lines must start with a command
 
+See `macos/test_script*.txt` for full example scripts.
+
 ### Basic Strings 
 
 ```text
@@ -130,11 +132,20 @@ You can modify the same settings as you can with the python tool.
 
 `SET_OS macos` to change special character handling. Can also be `other`. `other` is default.
 
-`SET_MIN_DELAY 20` to change the minimum delay between key presses in milliseconds.
+There are two independent delay ranges:
 
-`SET_MAX_DELAY 20` to change the maximum delay between key presses in milliseconds.
+- **Hold delay** — how long each key is physically held before release. Controlled with `SET_MIN_DELAY_HOLD` and `SET_MAX_DELAY_HOLD`. CLI flags: `--min-delay-hold` / `--max-delay-hold`.
+- **Gap delay** — the pause after each key is released before the next event. Controlled with `SET_MIN_DELAY` and `SET_MAX_DELAY`. CLI flags: `--min-delay` / `--max-delay`.
 
-These settings can be changed at any time in the script and will affect subsequent lines. So for example you can start of typing slowly and then speed up the typing after a certain point in the script.
+`SET_MIN_DELAY_HOLD 20` to change the minimum key hold duration in milliseconds.
+
+`SET_MAX_DELAY_HOLD 20` to change the maximum key hold duration in milliseconds.
+
+`SET_MIN_DELAY 20` to change the minimum gap delay between key presses in milliseconds.
+
+`SET_MAX_DELAY 20` to change the maximum gap delay between key presses in milliseconds.
+
+All four settings can be changed at any time in the script and will affect subsequent lines.
 
 ```text
 SET_MIN_DELAY 100
@@ -143,6 +154,9 @@ STRING This will be typed slowly
 SET_MIN_DELAY 5
 SET_MAX_DELAY 20
 STRING This will be typed quickly
+SET_MIN_DELAY_HOLD 1
+SET_MAX_DELAY_HOLD 5
+STRING Short key presses
 ```
 
 

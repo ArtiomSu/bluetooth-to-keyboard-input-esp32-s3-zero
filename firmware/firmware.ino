@@ -137,13 +137,26 @@ static volatile uint32_t lastSeenCounter = 0;
 // from a stale notification belonging to the previous chunk.
 static volatile uint8_t gCompletions = 0;
 
-// Per-keystroke delay range (milliseconds). When min == max the value is used
-// directly; when they differ, each keystroke picks a random delay in [min, max]
-// using the ESP32 hardware RNG. Default 20 ms matches previous fixed behaviour.
+// Per-keystroke delay ranges (milliseconds).  Two independent ranges:
+//   Hold  — how long the key is physically held down before release.
+//   Gap   — the pause after the key is released before the next event.
+// When min == max the value is used directly; when they differ, each keystroke
+// picks a random value in [min, max] using the ESP32 hardware RNG.
+// Default 20 ms for both maintains the previous fixed behaviour.
+static volatile uint16_t minHoldDelay      = 20;
+static volatile uint16_t maxHoldDelay      = 20;
 static volatile uint16_t minKeystrokeDelay = 20;
 static volatile uint16_t maxKeystrokeDelay = 20;
 
-// Return a keystroke delay in ms, randomised within [min, max].
+// Return a hold delay in ms, randomised within [minHoldDelay, maxHoldDelay].
+static uint16_t keystrokeHoldDelay() {
+    uint16_t lo = minHoldDelay;
+    uint16_t hi = maxHoldDelay;
+    if (lo >= hi) return lo;
+    return lo + (uint16_t)(esp_random() % ((uint32_t)(hi - lo) + 1));
+}
+
+// Return a gap delay in ms, randomised within [minKeystrokeDelay, maxKeystrokeDelay].
 static uint16_t keystrokeDelay() {
     uint16_t lo = minKeystrokeDelay;
     uint16_t hi = maxKeystrokeDelay;
@@ -344,9 +357,9 @@ static void pressRawKey(uint8_t hidKey, bool shift, bool alt) {
     if (shift) Keyboard.press(KEY_LEFT_SHIFT);
     if (alt)   Keyboard.press(KEY_LEFT_ALT);
     Keyboard.pressRaw(hidKey);
-    delay(keystrokeDelay());
+    delay(keystrokeHoldDelay());  // hold duration
     Keyboard.releaseAll();
-    delay(keystrokeDelay());
+    delay(keystrokeDelay());      // gap before next event
     applyModifiers();          // restore script-held modifiers after release
 }
 
@@ -570,10 +583,15 @@ class DelayCallbacks : public BLECharacteristicCallbacks {
         size_t valueLen = 0;
         const uint8_t *value = verifyPskHmac(
             (const uint8_t *)raw.c_str(), raw.length(), &valueLen);
-        if (!value || valueLen != 4) return;  // need exactly 2 × uint16 — drop
-        uint16_t minD = ((uint16_t)value[0] << 8) | value[1];  // big-endian
-        uint16_t maxD = ((uint16_t)value[2] << 8) | value[3];
-        if (minD > maxD) return;  // nonsensical range — drop
+        // Payload: [uint16 minHold BE][uint16 maxHold BE][uint16 minGap BE][uint16 maxGap BE]
+        if (!value || valueLen != 8) return;  // need exactly 4 × uint16 — drop
+        uint16_t minH = ((uint16_t)value[0] << 8) | value[1];  // big-endian
+        uint16_t maxH = ((uint16_t)value[2] << 8) | value[3];
+        uint16_t minD = ((uint16_t)value[4] << 8) | value[5];
+        uint16_t maxD = ((uint16_t)value[6] << 8) | value[7];
+        if (minH > maxH || minD > maxD) return;  // nonsensical ranges — drop
+        minHoldDelay      = minH;
+        maxHoldDelay      = maxH;
         minKeystrokeDelay = minD;
         maxKeystrokeDelay = maxD;
     }
@@ -838,8 +856,9 @@ void setup() {
         BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_READ
     );
     pDelay->setCallbacks(new DelayCallbacks());
-    static const uint8_t INIT_DELAY[4] = {0x00, 0x14, 0x00, 0x14};  // 20 ms / 20 ms
-    pDelay->setValue((uint8_t *)INIT_DELAY, 4);
+    // [uint16 minHold BE][uint16 maxHold BE][uint16 minGap BE][uint16 maxGap BE] — 20/20/20/20 ms
+    static const uint8_t INIT_DELAY[8] = {0x00, 0x14, 0x00, 0x14, 0x00, 0x14, 0x00, 0x14};
+    pDelay->setValue((uint8_t *)INIT_DELAY, 8);
 
     // Raw HID event characteristic — write encrypted raw key / modifier events.
     // Payload (after ECIES decrypt + counter strip): [1-byte type][optional 1-byte data]
@@ -904,13 +923,13 @@ void loop() {
                 bool isLockKey = (hidKey == K_CAPSLOCK ||
                                   hidKey == K_NUMLOCK  ||
                                   hidKey == K_SCROLLLOCK);
-                uint32_t holdMs = keystrokeDelay();
+                uint32_t holdMs = keystrokeHoldDelay();
                 if (isLockKey && holdMs < 200) holdMs = 200;
                 applyModifiers();
                 Keyboard.pressRaw(hidKey);
                 delay(holdMs);
                 Keyboard.releaseAll();
-                delay(keystrokeDelay());
+                delay(keystrokeDelay());  // gap before next event
                 applyModifiers();  // re-press any held modifiers after release
                 break;
             }

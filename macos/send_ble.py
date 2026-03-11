@@ -268,19 +268,27 @@ async def set_os(client: BleakClient, target_os: str) -> None:
     print(f"[BLE] OS set to: {target_os}")
 
 
-async def set_delay(client: BleakClient, min_ms: int, max_ms: int) -> None:
-    """Set the per-keystroke delay range on the ESP32.
+async def set_delay(
+    client: BleakClient,
+    min_hold_ms: int,
+    max_hold_ms: int,
+    min_ms: int,
+    max_ms: int,
+) -> None:
+    """Set the per-keystroke hold and gap delay ranges on the ESP32.
 
-    When min_ms == max_ms every keystroke uses that fixed delay.
-    When they differ, the firmware picks a random delay in [min_ms, max_ms] ms
-    for each keystroke using its hardware RNG.
+    Hold delay  — how long a key is physically held before release.
+    Gap delay   — the pause after release before the next event.
+
+    When min == max the value is used directly; when they differ, the firmware
+    picks a random delay in [min, max] ms per keystroke using its hardware RNG.
     """
-    value = struct.pack(">HH", min_ms, max_ms)
+    # Payload: [uint16 minHold BE][uint16 maxHold BE][uint16 minGap BE][uint16 maxGap BE]
+    value = struct.pack(">HHHH", min_hold_ms, max_hold_ms, min_ms, max_ms)
     await client.write_gatt_char(DELAY_CHAR_UUID, hmac_wrap(value), response=True)
-    if min_ms == max_ms:
-        print(f"[BLE] Keystroke delay set to: {min_ms} ms")
-    else:
-        print(f"[BLE] Keystroke delay set to: {min_ms}\u2013{max_ms} ms (random per keystroke)")
+    hold_str = str(min_hold_ms) if min_hold_ms == max_hold_ms else f"{min_hold_ms}\u2013{max_hold_ms}"
+    gap_str  = str(min_ms)      if min_ms      == max_ms      else f"{min_ms}\u2013{max_ms}"
+    print(f"[BLE] Keystroke delay: hold={hold_str} ms, gap={gap_str} ms")
 
 
 async def _send_raw_event(client: BleakClient, event_type: int, payload: bytes, esp32_pubkey: bytes) -> None:
@@ -386,7 +394,7 @@ async def interactive_mode(client: BleakClient, esp32_pubkey: bytes, enter: bool
         await send_string(client, text, esp32_pubkey)
 
 
-async def main(one_shot_text: str | None = None, layout: str = "en-US", target_os: str = "other", enter: bool = False, min_delay: int = 20, max_delay: int = 20, script_path: str | None = None) -> None:
+async def main(one_shot_text: str | None = None, layout: str = "en-US", target_os: str = "other", enter: bool = False, min_delay: int = 20, max_delay: int = 20, min_hold_delay: int = 20, max_hold_delay: int = 20, script_path: str | None = None) -> None:
     device = await find_device()
     _reset_counter()  # fresh counter for every new connection
 
@@ -407,7 +415,7 @@ async def main(one_shot_text: str | None = None, layout: str = "en-US", target_o
 
         await set_layout(client, layout)
         await set_os(client, target_os)
-        await set_delay(client, min_delay, max_delay)
+        await set_delay(client, min_hold_delay, max_hold_delay, min_delay, max_delay)
 
         if script_path is not None:
             # Lazy import avoids a circular dependency: script_runner imports
@@ -424,6 +432,8 @@ async def main(one_shot_text: str | None = None, layout: str = "en-US", target_o
                     client, esp32_pubkey, script_path,
                     initial_min_delay=min_delay,
                     initial_max_delay=max_delay,
+                    initial_min_hold_delay=min_hold_delay,
+                    initial_max_hold_delay=max_hold_delay,
                 )
             except ScriptError as e:
                 raise RuntimeError(str(e))
@@ -472,8 +482,23 @@ if __name__ == "__main__":
         type=int,
         default=20,
         metavar="MS",
-        help="Maximum per-keystroke delay in ms (default: 20). "
+        help="Maximum gap delay in ms after each key release (default: 20). "
              "If different from --min-delay, each keystroke uses a random delay in that range.",
+    )
+    parser.add_argument(
+        "--min-delay-hold",
+        type=int,
+        default=20,
+        metavar="MS",
+        help="Minimum hold duration in ms for each key press (default: 20).",
+    )
+    parser.add_argument(
+        "--max-delay-hold",
+        type=int,
+        default=20,
+        metavar="MS",
+        help="Maximum hold duration in ms for each key press (default: 20). "
+             "If different from --min-delay-hold, each keystroke uses a random hold duration.",
     )
     parser.add_argument(
         "text",
@@ -488,6 +513,10 @@ if __name__ == "__main__":
         parser.error("--min-delay and --max-delay must be non-negative")
     if args.min_delay > args.max_delay:
         parser.error("--min-delay must be ≤ --max-delay")
+    if args.min_delay_hold < 0 or args.max_delay_hold < 0:
+        parser.error("--min-delay-hold and --max-delay-hold must be non-negative")
+    if args.min_delay_hold > args.max_delay_hold:
+        parser.error("--min-delay-hold must be \u2264 --max-delay-hold")
     try:
         asyncio.run(main(
             one_shot_text=one_shot,
@@ -496,6 +525,8 @@ if __name__ == "__main__":
             enter=args.enter,
             min_delay=args.min_delay,
             max_delay=args.max_delay,
+            min_hold_delay=args.min_delay_hold,
+            max_hold_delay=args.max_delay_hold,
             script_path=args.script,
         ))
     except RuntimeError as e:

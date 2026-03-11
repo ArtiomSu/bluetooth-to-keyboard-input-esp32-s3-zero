@@ -130,7 +130,7 @@ async def _execute_command(
                 f"Line {lineno}: SET_MIN_DELAY expects a non-negative integer, got {rest!r}"
             )
         ctx["min_delay"] = ms
-        await set_delay(client, ctx["min_delay"], ctx["max_delay"])
+        await set_delay(client, ctx["min_hold_delay"], ctx["max_hold_delay"], ctx["min_delay"], ctx["max_delay"])
 
     elif cmd == "SET_MAX_DELAY":
         try:
@@ -142,7 +142,31 @@ async def _execute_command(
                 f"Line {lineno}: SET_MAX_DELAY expects a non-negative integer, got {rest!r}"
             )
         ctx["max_delay"] = ms
-        await set_delay(client, ctx["min_delay"], ctx["max_delay"])
+        await set_delay(client, ctx["min_hold_delay"], ctx["max_hold_delay"], ctx["min_delay"], ctx["max_delay"])
+
+    elif cmd == "SET_MIN_DELAY_HOLD":
+        try:
+            ms = int(rest)
+            if ms < 0:
+                raise ValueError
+        except ValueError:
+            raise ScriptError(
+                f"Line {lineno}: SET_MIN_DELAY_HOLD expects a non-negative integer, got {rest!r}"
+            )
+        ctx["min_hold_delay"] = ms
+        await set_delay(client, ctx["min_hold_delay"], ctx["max_hold_delay"], ctx["min_delay"], ctx["max_delay"])
+
+    elif cmd == "SET_MAX_DELAY_HOLD":
+        try:
+            ms = int(rest)
+            if ms < 0:
+                raise ValueError
+        except ValueError:
+            raise ScriptError(
+                f"Line {lineno}: SET_MAX_DELAY_HOLD expects a non-negative integer, got {rest!r}"
+            )
+        ctx["max_hold_delay"] = ms
+        await set_delay(client, ctx["min_hold_delay"], ctx["max_hold_delay"], ctx["min_delay"], ctx["max_delay"])
 
     else:
         raise ScriptError(f"Line {lineno}: Unknown command {cmd!r}")
@@ -156,23 +180,32 @@ async def run_script(
     script_path: str,
     initial_min_delay: int = 20,
     initial_max_delay: int = 20,
+    initial_min_hold_delay: int = 20,
+    initial_max_hold_delay: int = 20,
 ) -> None:
     """Parse and execute *script_path* on the connected ESP32.
 
     Parameters
     ----------
-    client              Connected BleakClient.
-    esp32_pubkey        Verified 32-byte X25519 public key used to encrypt
-                        every outbound payload.
-    script_path         Path to the script file to execute.
-    initial_min_delay   Per-keystroke delay lower bound to start with (ms).
-                        Inherited from the --min-delay CLI flag; the script
-                        can override it at any point with SET_MIN_DELAY.
-    initial_max_delay   Per-keystroke delay upper bound to start with (ms).
-                        Inherited from the --max-delay CLI flag; the script
-                        can override it at any point with SET_MAX_DELAY.
+    client                  Connected BleakClient.
+    esp32_pubkey            Verified 32-byte X25519 public key used to encrypt
+                            every outbound payload.
+    script_path             Path to the script file to execute.
+    initial_min_delay       Gap delay lower bound to start with (ms).
+                            Inherited from --min-delay; overridable with SET_MIN_DELAY.
+    initial_max_delay       Gap delay upper bound to start with (ms).
+                            Inherited from --max-delay; overridable with SET_MAX_DELAY.
+    initial_min_hold_delay  Hold duration lower bound to start with (ms).
+                            Inherited from --min-delay-hold; overridable with SET_MIN_DELAY_HOLD.
+    initial_max_hold_delay  Hold duration upper bound to start with (ms).
+                            Inherited from --max-delay-hold; overridable with SET_MAX_DELAY_HOLD.
     """
-    ctx: dict = {"min_delay": initial_min_delay, "max_delay": initial_max_delay}
+    ctx: dict = {
+        "min_delay":      initial_min_delay,
+        "max_delay":      initial_max_delay,
+        "min_hold_delay": initial_min_hold_delay,
+        "max_hold_delay": initial_max_hold_delay,
+    }
 
     try:
         with open(script_path, "r", encoding="utf-8") as f:
