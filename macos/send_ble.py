@@ -32,9 +32,11 @@ import argparse
 import asyncio
 import hashlib
 import hmac
+import json
 import os
 import struct
 import sys
+from pathlib import Path
 from bleak import BleakClient, BleakScanner
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -50,16 +52,60 @@ OS_CHAR_UUID        = "12340003-1234-1234-1234-123456789abc"
 PUBKEY_CHAR_UUID    = "12340004-1234-1234-1234-123456789abc"  # read: ESP32's 32-byte X25519 pubkey
 PUBKEY_SIG_CHAR_UUID = "12340005-1234-1234-1234-123456789abc" # read: HMAC-SHA256(PSK, pubkey)
 READY_CHAR_UUID     = "12340006-1234-1234-1234-123456789abc"  # read: 0x01=ready, 0x00=busy typing
-DELAY_CHAR_UUID     = "12340007-1234-1234-1234-123456789abc"  # write: [uint16 minMs BE][uint16 maxMs BE]
-RAW_CHAR_UUID       = "12340008-1234-1234-1234-123456789abc"  # write: encrypted raw HID event
+DELAY_CHAR_UUID      = "12340007-1234-1234-1234-123456789abc"  # write: hold+gap delays
+RAW_CHAR_UUID        = "12340008-1234-1234-1234-123456789abc"  # write: encrypted raw HID event
+PROVISION_CHAR_UUID  = "12340009-1234-1234-1234-123456789abc"  # write: provisioning payload
 
-# ── Pre-shared key for public-key authentication ──────────────────────────────
-# Must match PSK[] in firmware.ino exactly.
-# Generate your own: python3 -c "import os; print(os.urandom(32).hex())"
-PSK = bytes.fromhex(
+# ── Device identity (overridden at runtime by resolve_device) ─────────────────
+_DEFAULT_DEVICE_NAME = "ESP32-KB"
+_DEFAULT_PSK_HEX = (
     "a3f1c8e2b5d4079612fe3a8bc9e05d7f"
     "4162ab90c8e3d5f617284a9b3c06e1f2"
 )
+# Active PSK — set by main() via resolve_device(); starts as the compiled-in default.
+PSK: bytes = bytes.fromhex(_DEFAULT_PSK_HEX)
+
+# ── Multi-device config (~/.bluetooth-input/devices.json) ──────────────────────
+CONFIG_PATH = Path.home() / ".bluetooth-input" / "devices.json"
+
+
+def load_config() -> dict:
+    """Return the parsed config dict, or {"devices": {}} if the file doesn't exist."""
+    if not CONFIG_PATH.exists():
+        return {"devices": {}}
+    with CONFIG_PATH.open() as f:
+        return json.load(f)
+
+
+def save_config(cfg: dict) -> None:
+    """Persist *cfg* to CONFIG_PATH, creating parent directories as needed."""
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with CONFIG_PATH.open("w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+
+
+def resolve_device(alias: str | None) -> tuple[str, bytes]:
+    """Return (ble_name, psk_bytes) for the given alias.
+
+    Rules:
+    - alias omitted: always use compiled-in defaults, regardless of config.
+      Connect to whatever is advertising as DEFAULT_DEVICE_NAME with the
+      default PSK (i.e. an unprovisioned or factory-reset device).
+    - alias given: look it up in config; raise KeyError if not found.
+    """
+    if alias is None:
+        return _DEFAULT_DEVICE_NAME, bytes.fromhex(_DEFAULT_PSK_HEX)
+
+    cfg = load_config()
+    devices: dict = cfg.get("devices", {})
+    if alias not in devices:
+        raise KeyError(
+            f"Device alias '{alias}' not found in {CONFIG_PATH}. "
+            f"Known aliases: {', '.join(devices) or '(none)'}."
+        )
+    entry = devices[alias]
+    return entry["ble_name"], bytes.fromhex(entry["psk"])
 
 # ── Modifier bitmasks — must match MOD_* defines in firmware.ino ───────────────────
 MOD_LSHIFT = 0x01   # Left Shift
@@ -187,13 +233,13 @@ async def wait_for_ready(target: int) -> None:
             pass  # loop back and re-check; also guards against missed notifications
 
 
-async def find_device():
+async def find_device(device_name: str):
     """Scan for the ESP32 by name and return the BLE device object."""
-    print(f"[BLE] Scanning for '{DEVICE_NAME}' (up to {SCAN_TIMEOUT:.0f}s)…")
-    device = await BleakScanner.find_device_by_name(DEVICE_NAME, timeout=SCAN_TIMEOUT)
+    print(f"[BLE] Scanning for '{device_name}' (up to {SCAN_TIMEOUT:.0f}s)…")
+    device = await BleakScanner.find_device_by_name(device_name, timeout=SCAN_TIMEOUT)
     if device is None:
         raise RuntimeError(
-            f"Device '{DEVICE_NAME}' not found. "
+            f"Device '{device_name}' not found. "
             "Make sure the ESP32 is powered on and advertising."
         )
     print(f"[BLE] Found: {device.name}  ({device.address})")
@@ -394,8 +440,10 @@ async def interactive_mode(client: BleakClient, esp32_pubkey: bytes, enter: bool
         await send_string(client, text, esp32_pubkey)
 
 
-async def main(one_shot_text: str | None = None, layout: str = "en-US", target_os: str = "other", enter: bool = False, min_delay: int = 20, max_delay: int = 20, min_hold_delay: int = 20, max_hold_delay: int = 20, script_path: str | None = None) -> None:
-    device = await find_device()
+async def main(one_shot_text: str | None = None, layout: str = "en-US", target_os: str = "other", enter: bool = False, min_delay: int = 20, max_delay: int = 20, min_hold_delay: int = 20, max_hold_delay: int = 20, script_path: str | None = None, device_alias: str | None = None) -> None:
+    global PSK
+    device_name, PSK = resolve_device(device_alias)
+    device = await find_device(device_name)
     _reset_counter()  # fresh counter for every new connection
 
     async with BleakClient(device) as client:
@@ -448,6 +496,13 @@ async def main(one_shot_text: str | None = None, layout: str = "en-US", target_o
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Send text to ESP32 BLE keyboard bridge.")
+    parser.add_argument(
+        "--device",
+        metavar="ALIAS",
+        default=None,
+        help="Device alias from ~/.bluetooth-input/devices.json. "
+             "Required when multiple devices are configured; omit if only one is present.",
+    )
     parser.add_argument(
         "--layout",
         default="en-US",
@@ -528,6 +583,7 @@ if __name__ == "__main__":
             min_hold_delay=args.min_delay_hold,
             max_hold_delay=args.max_delay_hold,
             script_path=args.script,
+            device_alias=args.device,
         ))
     except RuntimeError as e:
         print(f"[ERROR] {e}", file=sys.stderr)

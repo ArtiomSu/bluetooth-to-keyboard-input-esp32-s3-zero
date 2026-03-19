@@ -19,10 +19,12 @@ bluetooth-input/
 │   ├── firmware.ino   ← Arduino sketch for the ESP32-S3
 │   └── keytypes.h     ← shared types (KeyLayout, KeyOS, KeyEntry)
 └── macos/
-    ├── send_ble.py    ← Python BLE client for macOS
+    ├── send_ble.py      ← Python BLE client for macOS
     ├── script_runner.py ← ducky-script parser (used by send_ble.py --script)
+    ├── provision.py     ← first-time setup, re-provisioning, and factory reset
+    ├── list_devices.py  ← scan and display nearby BLE devices
     ├── requirements.txt
-    └── tests.sh       ← automated and manual test suite
+    └── tests.sh         ← automated and manual test suite
 ```
 
 ---
@@ -90,27 +92,98 @@ After the initial flash, re-flashing is straightforward:
 
 ---
 
-## 3 — Change the pre-shared key (important before production use)
+## 3 — Manage device identity
 
-Both sides share a 32-byte PSK used to authenticate the ESP32's public key and
-to authenticate layout/OS writes. The repository ships with a placeholder key —
-**you must replace it** before deploying.
+Each physical device has a BLE name and a PSK stored in its flash (NVS). On
+first flash both are the compiled-in defaults (`ESP32-KB` / hardcoded PSK).
+Use the tools below to assign unique identities and keep track of them.
 
-Generate a new key:
+### Discover nearby devices
 
 ```bash
-python3 -c "import os; print(os.urandom(32).hex())"
+python list_devices.py
 ```
 
-Update both locations with the same value:
+Scans for 10 seconds and prints a colour-coded table of every BLE device in
+range:
 
-- **`firmware/firmware.ino`** — find `static const uint8_t PSK[32]` and replace
-  the byte array with your key (split the hex string into pairs, prefix each
-  with `0x`, separate with commas).
-- **`macos/send_ble.py`** — find `PSK = bytes.fromhex(...)` and replace the hex
-  string with your key.
+```
+St  Name             Address                                RSSI  Alias
+──  ───────────────  ────────────────────────────────────  ─────  ──────
+✓   ESP32-KB-office  4CB2…A32C                               -53  office
+⚠   ESP32-KB         E854…310A                               -78
+●   ESP32-KB-home2   AB12…FF01                               -82
+✗   AirPods          75E7…A377                               -67
+```
 
-Re-flash the firmware after changing it.
+| Symbol | Colour | Meaning |
+|--------|--------|---------|
+| `✓` | green  | Configured in `devices.json` with a custom PSK |
+| `⚠` | yellow | Using the factory default PSK — provision it! |
+| `●` | cyan   | Has the ESP32-KB service UUID but is not in your config |
+| `✗` | dim    | Unrelated Bluetooth device |
+
+Use `--timeout SECONDS` to scan longer (default: 10 s).
+
+### First-time provisioning
+
+Omit `--device` when the device is still using factory defaults:
+
+```bash
+python provision.py --new-alias office-desk --new-name "ESP32-KB-office"
+```
+
+This will:
+1. Connect to the device advertising as `ESP32-KB` (using the factory default PSK).
+2. Generate a new random 32-byte PSK.
+3. Write the provisioning characteristic — the ESP32 saves the new name and PSK
+   to flash (NVS) and restarts, advertising as `ESP32-KB-office`.
+4. Save the alias, BLE name, and PSK to `~/.bluetooth-input/devices.json`.
+
+### Re-provisioning (change name or PSK on an existing device)
+
+Always supply `--device` when targeting an already-provisioned device:
+
+```bash
+python provision.py --device office-desk --new-alias office-desk --new-name "ESP32-KB-office"
+```
+
+The `--device` flag selects which entry in `devices.json` to authenticate with.
+The device restarts automatically and the config is updated in place.
+
+### Factory reset
+
+Wipes the NVS on the device (name and PSK revert to firmware defaults) and
+removes the entry from `devices.json`:
+
+```bash
+python provision.py --device office-desk --factory-reset
+```
+
+After the reset the device advertises as `ESP32-KB` again and the factory
+default PSK is active.
+
+> **Note:** Reflashing the firmware does **not** erase NVS — the stored name
+> and PSK survive a normal upload. Use `--factory-reset` or enable
+> **Tools → Erase All Flash Before Sketch Upload** in the Arduino IDE if you
+> want a clean slate after reflashing.
+
+### Config file format
+
+`~/.bluetooth-input/devices.json`:
+
+```json
+{
+  "devices": {
+    "office-desk": { "ble_name": "ESP32-KB-office", "psk": "a3f1c8e2..." },
+    "home-pc":     { "ble_name": "ESP32-KB-home",   "psk": "b4e2d9f1..." }
+  }
+}
+```
+
+> **If you don't provision**, `send_ble.py` (when run without `--device`)
+> connects to whatever device responds to the default name `ESP32-KB` using
+> the factory PSK. This is only safe for personal use on a trusted network.
 
 ---
 
@@ -133,11 +206,15 @@ pip install -r requirements.txt
 Two flags control how symbols are typed. Set them to match the **target machine** (the one the ESP32 is plugged into).
 
 | Flag | Options | Default | Purpose |
-|------|---------|---------|---------|
+|------|---------|---------|----------|
+| `--device` | alias string | *(none)* | Device alias from `devices.json`. Omit to connect to the default-named `ESP32-KB` device with the factory PSK. |
 | `--layout` | `en-US`, `en-GB` | `en-US` | Keyboard input source / locale |
 | `--os` | `other`, `macos` | `other` | OS of the target machine |
-| `--enter` | *(flag, no value)* | off | Press Enter after the text || `--min-delay` | integer ms | `20` | Minimum per-keystroke delay |
-| `--max-delay` | integer ms | `20` | Maximum per-keystroke delay — if different from `--min-delay`, each keystroke uses a random delay in that range |
+| `--enter` | *(flag, no value)* | off | Press Enter after the text |
+| `--min-delay` | integer ms | `20` | Minimum gap delay after each key release |
+| `--max-delay` | integer ms | `20` | Maximum gap delay — if different from `--min-delay`, each keystroke uses a random delay in that range |
+| `--min-delay-hold` | integer ms | `20` | Minimum key hold duration |
+| `--max-delay-hold` | integer ms | `20` | Maximum key hold duration |
 > **`--os macos`** is needed when the target is a Mac running the British layout,
 > because macOS uses **Option+3** for `#` whereas Windows/Linux/Android use a
 > dedicated ISO key (HID 0x32).
@@ -147,14 +224,17 @@ Two flags control how symbols are typed. Set them to match the **target machine*
 ### One-shot (send a single string and exit)
 
 ```bash
-# US layout, any OS (defaults)
+# US layout, any OS (defaults, single device)
 python send_ble.py "Hello, World!"
 
+# Specific device by alias
+python send_ble.py --device office-desk "Hello, World!"
+
 # UK layout on a Mac, press Enter at the end
-python send_ble.py --layout en-GB --os macos --enter 'Hello, World *###£$@'
+python send_ble.py --device office-desk --layout en-GB --os macos --enter 'Hello, World *###£$@'
 
 # UK layout on Windows / Linux
-python send_ble.py --layout en-GB --os other 'Hello, World *###£$@'
+python send_ble.py --device office-desk --layout en-GB --os other 'Hello, World *###£$@'
 
 # Random per-keystroke delay between 50 and 150 ms (mimics human typing speed)
 python send_ble.py --min-delay 50 --max-delay 150 "Hello, World!"
@@ -233,12 +313,13 @@ The ESP32 exposes six characteristics under service `12340000-1234-1234-1234-123
 | `...0004...` | read | ESP32's ephemeral X25519 public key (32 bytes) |
 | `...0005...` | read | `HMAC-SHA256(PSK, pubkey)` — proves the key is genuine |
 | `...0006...` | read/notify | Chunk-completion counter — firmware notifies after each chunk is typed |
-| `...0007...` | write | Keystroke delay — `[uint16 minMs][uint16 maxMs]` big-endian (HMAC-authenticated); each keystroke uses a random delay drawn from this range |
-| `...0008...` | write | Raw HID event — encrypted with ECIES; payload: `[1-byte type][optional 1-byte data]`. Types: `0x01` KEY_TAP (HID keycode), `0x02` MOD_DOWN (bitmask), `0x03` MOD_UP (bitmask), `0x04` MOD_CLEAR |
+| `...0007...` | write | Keystroke delays — `[uint16 minHold][uint16 maxHold][uint16 minGap][uint16 maxGap]` big-endian ms (HMAC-authenticated) |
+| `...0008...` | write | Raw HID event — encrypted with ECIES; payload: `[1-byte type][optional 1-byte data]`. Types: `0x01` KEY_TAP, `0x02` MOD_DOWN, `0x03` MOD_UP, `0x04` MOD_CLEAR |
+| `...0009...` | write | Provisioning — `HMAC(currentPSK, [name_len:1][name][new_psk:32])`; ESP32 saves to NVS and restarts |
 
 ### Connection flow
 
-1. Script scans for `ESP32-KB` and connects.
+1. Script scans for the device BLE name and connects.
 2. Subscribes to BLE Notify on the ready characteristic (`...0006...`).
 3. Reads the ESP32's ephemeral X25519 public key and verifies its HMAC signature
    against the PSK. Aborts if the signature is wrong (MITM protection).
@@ -268,7 +349,9 @@ The ESP32 exposes six characteristics under service `12340000-1234-1234-1234-123
 | Symptom | Fix |
 |---------|-----|
 | Device not found during scan | Confirm the ESP32 is powered and the USB cable supports data (not charge-only). Check it enumerates as a keyboard in **System Information → USB**. |
-| Public key authentication FAILED | PSK mismatch — make sure `PSK` in `send_ble.py` exactly matches `PSK[32]` in `firmware.ino` and re-flash. |
+| `list_devices.py` shows `⚠` for a provisioned device | The stored PSK in `devices.json` is still the factory default. Run `provision.py --device ALIAS --new-alias ALIAS --new-name NAME` to assign a real PSK. |
+| Public key authentication FAILED | PSK mismatch — the device's stored PSK differs from what `devices.json` (or the factory default) says. Re-provision or factory-reset the device. |
+| Reflashing didn't clear the old name/PSK | NVS is in a separate flash partition and survives normal uploads. Use `provision.py --factory-reset` or enable **Erase All Flash Before Sketch Upload** in Arduino IDE. |
 | `#` types as `£` on a Mac | Add `--os macos`; macOS uses Option+3 for `#` on the British layout. |
 | `#` types as `£` on Windows/Linux | Use `--os other` (the default); HID 0x32 produces `#` there. |
 | `@` and `"` are swapped | Make sure `--layout en-GB` is set to match the target machine's input source. |

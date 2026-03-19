@@ -27,6 +27,9 @@
 #include <BLE2902.h>
 #include "keytypes.h"
 
+// NVS — for persistent per-device identity (name + PSK)
+#include <Preferences.h>
+
 // mbedTLS — bundled with ESP32 Arduino core via ESP-IDF
 #include <mbedtls/ecdh.h>
 #include <mbedtls/gcm.h>
@@ -42,7 +45,9 @@
 
 // ── BLE identifiers ──────────────────────────────────────────────────────────
 // Keep these in sync with the macOS script.
-#define DEVICE_NAME             "ESP32-KB"
+// DEVICE_NAME is no longer a compile-time constant — it is loaded from NVS at
+// boot (see deviceName[] below).  The default below is used on first flash.
+#define DEFAULT_DEVICE_NAME     "ESP32-KB"
 #define SERVICE_UUID            "12340000-1234-1234-1234-123456789abc"
 #define CHARACTERISTIC_UUID     "12340001-1234-1234-1234-123456789abc"
 #define LAYOUT_CHAR_UUID        "12340002-1234-1234-1234-123456789abc"  // write "en-US" or "en-GB"
@@ -52,6 +57,7 @@
 #define READY_CHAR_UUID         "12340006-1234-1234-1234-123456789abc"  // read: 0x01=ready to receive, 0x00=busy typing
 #define DELAY_CHAR_UUID         "12340007-1234-1234-1234-123456789abc"  // write: [uint16 minDelay][uint16 maxDelay] big-endian, in ms
 #define RAW_CHAR_UUID           "12340008-1234-1234-1234-123456789abc"  // write: encrypted raw HID event [1-byte type][optional data]
+#define PROVISION_CHAR_UUID     "12340009-1234-1234-1234-123456789abc"  // write: HMAC(curPSK, payload) + [name_len:1][name][new_psk:32]
 
 // Encrypted packet layout: [32 mac_pubkey][12 nonce][ciphertext][16 GCM tag]
 #define CRYPTO_OVERHEAD 60   // 32 + 12 + 16
@@ -60,16 +66,52 @@
 #define LED_PIN   21   // GPIO21 — onboard WS2812
 #define LED_COUNT  1
 
-// ── Pre-shared key for public-key authentication ──────────────────────────────
-// Both sides must have the same bytes. Generate your own and keep it secret:
-//   python3 -c "import os; print(os.urandom(32).hex())"
-// Then update PSK here AND PSK in send_ble.py.
-static const uint8_t PSK[32] = {
+// ── Default PSK (used on first flash; overwritten by provisioning) ────────────
+// Both sides must start with the same bytes.
+// After first provisioning, NVS holds the real per-device PSK and this is
+// never consulted again unless the firmware is reflashed.
+static const uint8_t DEFAULT_PSK[32] = {
     0xa3, 0xf1, 0xc8, 0xe2, 0xb5, 0xd4, 0x07, 0x96,
     0x12, 0xfe, 0x3a, 0x8b, 0xc9, 0xe0, 0x5d, 0x7f,
     0x41, 0x62, 0xab, 0x90, 0xc8, 0xe3, 0xd5, 0xf6,
     0x17, 0x28, 0x4a, 0x9b, 0x3c, 0x06, 0xe1, 0xf2
 };
+
+// ── Runtime identity — loaded from NVS at boot ───────────────────────────────
+// 32-char max name + null terminator.  Mutable: provisioning writes here then
+// saves to NVS and restarts.
+static uint8_t PSK[32];           // active PSK (loaded from NVS or DEFAULT_PSK)
+static char    deviceName[33];    // active BLE name (loaded from NVS or DEFAULT_DEVICE_NAME)
+
+// Preferences handle — opened read/write in loadIdentity(), read-only thereafter.
+static Preferences prefs;
+
+/**
+ * Load device identity (name + PSK) from NVS.  Falls back to compiled-in
+ * defaults when the keys are absent (i.e. first flash).
+ */
+static void loadIdentity() {
+    prefs.begin("bt-kb", /*readOnly=*/false);
+
+    // PSK
+    if (prefs.isKey("psk")) {
+        prefs.getBytes("psk", PSK, 32);
+    } else {
+        memcpy(PSK, DEFAULT_PSK, 32);
+    }
+
+    // Device name
+    if (prefs.isKey("name")) {
+        String n = prefs.getString("name", DEFAULT_DEVICE_NAME);
+        strncpy(deviceName, n.c_str(), 32);
+        deviceName[32] = '\0';
+    } else {
+        strncpy(deviceName, DEFAULT_DEVICE_NAME, 32);
+        deviceName[32] = '\0';
+    }
+
+    prefs.end();
+}
 
 // ── Globals ───────────────────────────────────────────────────────────────────
 USBHIDKeyboard Keyboard;
@@ -576,6 +618,49 @@ static bool decryptPayload(const uint8_t *pkt, size_t pktLen, char *out, size_t 
     return true;
 }
 
+// ── BLE provisioning characteristic callback ────────────────────────────────
+// Payload after HMAC(currentPSK, …) strip:
+//   [name_len : 1 byte][name : name_len bytes (1–32)][new_psk : 32 bytes]
+// The entire write is authenticated with the *current* PSK so only a client
+// that already knows the secret can change the name or PSK.
+class ProvisionCallbacks : public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pChar) override {
+        String raw = pChar->getValue();
+        size_t valueLen = 0;
+        const uint8_t *payload = verifyPskHmac(
+            (const uint8_t *)raw.c_str(), raw.length(), &valueLen);
+        if (!payload) return;  // bad HMAC — reject silently
+
+        // payload: [name_len:1][name:name_len][new_psk:32]
+        // Special case: name_len == 0 means factory reset — clear NVS and reboot.
+        if (valueLen >= 1 && payload[0] == 0) {
+            prefs.begin("bt-kb", /*readOnly=*/false);
+            prefs.clear();
+            prefs.end();
+            esp_restart();
+        }
+        if (valueLen < 1 + 1 + 32) return;  // too short
+        uint8_t nameLen = payload[0];
+        if (nameLen < 1 || nameLen > 32) return;  // invalid name length
+        if (valueLen != (size_t)(1 + nameLen + 32)) return;  // length mismatch
+
+        const uint8_t *newNameBytes = payload + 1;
+        const uint8_t *newPsk       = payload + 1 + nameLen;
+
+        // Persist to NVS
+        prefs.begin("bt-kb", /*readOnly=*/false);
+        char nameBuf[33] = {};
+        memcpy(nameBuf, newNameBytes, nameLen);
+        prefs.putString("name", nameBuf);
+        prefs.putBytes("psk", newPsk, 32);
+        prefs.end();
+
+        // Restart so the new BLE name and PSK take effect cleanly.
+        // The BLE stack does not support renaming a live advertisement.
+        esp_restart();
+    }
+};
+
 // ── BLE delay characteristic callback ───────────────────────────────────────
 class DelayCallbacks : public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pChar) override {
@@ -777,6 +862,9 @@ static void ledTask(void *) {
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
 void setup() {
+    // --- Load per-device identity from NVS (name + PSK) ---
+    loadIdentity();
+
     // --- WS2812 LED ---
     led.begin();
     led.setBrightness(50);
@@ -789,7 +877,7 @@ void setup() {
     USB.begin();
 
     // --- BLE GATT server ---
-    BLEDevice::init(DEVICE_NAME);
+    BLEDevice::init(deviceName);
     BLEDevice::setMTU(517);  // request large MTU for longer strings
 
     // --- App-layer crypto: initialise RNG + Curve25519 group ---
@@ -868,6 +956,15 @@ void setup() {
         BLECharacteristic::PROPERTY_WRITE_NR
     );
     pRaw->setCallbacks(new RawEventCallbacks());
+
+    // Provisioning characteristic — authenticated name+PSK update.
+    // Write-only (no read): leaking the current name/PSK over BLE would be
+    // a security regression since the channel isn't encrypted at the GATT layer.
+    BLECharacteristic *pProvision = pService->createCharacteristic(
+        PROVISION_CHAR_UUID,
+        BLECharacteristic::PROPERTY_WRITE
+    );
+    pProvision->setCallbacks(new ProvisionCallbacks());
 
     // Ready characteristic: firmware notifies client on state change.
     // 0x01 = ready to receive next chunk; 0x00 = busy typing.
