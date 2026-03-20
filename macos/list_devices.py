@@ -28,7 +28,31 @@ from send_ble import SERVICE_UUID, load_config, _DEFAULT_PSK_HEX, _DEFAULT_DEVIC
 SCAN_TIMEOUT_DEFAULT = 10.0
 
 # ── ANSI colour helpers ───────────────────────────────────────────────────────
-_USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+def _vt_supported() -> bool:
+    """Return True if the terminal is known to support ANSI escape codes."""
+    if not sys.stdout.isatty():
+        return False
+    if os.environ.get("NO_COLOR"):
+        return False
+    if sys.platform == "win32":
+        # Try to enable VT processing (Windows 10 1511+).
+        # Falls back gracefully on older Windows where the flag is ignored.
+        try:
+            import ctypes
+            import ctypes.wintypes
+            kernel32 = ctypes.windll.kernel32
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+            handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+            mode = ctypes.wintypes.DWORD()
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                return bool(kernel32.SetConsoleMode(
+                    handle, mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING))
+        except Exception:
+            pass
+        return False
+    return True
+
+_USE_COLOR = _vt_supported()
 
 def _c(code: str, text: str) -> str:
     return f"\033[{code}m{text}\033[0m" if _USE_COLOR else text
