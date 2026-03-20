@@ -1,0 +1,243 @@
+package com.terminal_heat_sink.bluetoothtokeyboardinput.ui.viewmodel
+
+import android.app.Application
+import android.bluetooth.BluetoothDevice
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleManager
+import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.ConnectionState
+import com.terminal_heat_sink.bluetoothtokeyboardinput.crypto.CryptoManager
+import com.terminal_heat_sink.bluetoothtokeyboardinput.data.DeviceConfig
+import com.terminal_heat_sink.bluetoothtokeyboardinput.data.DeviceRepository
+import com.terminal_heat_sink.bluetoothtokeyboardinput.script.ScriptContext
+import com.terminal_heat_sink.bluetoothtokeyboardinput.script.runScript
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+
+class BleViewModel(application: Application) : AndroidViewModel(application) {
+
+    val bleManager = BleManager(application)
+    private var cryptoManager: CryptoManager? = null
+    var activeDevice: DeviceConfig? = null
+        private set
+
+    val connectionState: StateFlow<ConnectionState> = bleManager.connectionState
+
+    val repository = DeviceRepository(application)
+
+    private val _statusMessage = MutableStateFlow<String?>(null)
+    val statusMessage: StateFlow<String?> = _statusMessage.asStateFlow()
+
+    private val _isBusy = MutableStateFlow(false)
+    val isBusy: StateFlow<Boolean> = _isBusy.asStateFlow()
+
+    // Device config selected by the user from the saved-devices list, used during scan/connect.
+    // null means "new device" (use default PSK).
+    private val _pendingConfig = MutableStateFlow<DeviceConfig?>(null)
+    val pendingConfig: StateFlow<DeviceConfig?> = _pendingConfig.asStateFlow()
+
+    fun selectDeviceConfig(config: DeviceConfig?) {
+        _pendingConfig.value = config
+    }
+
+    // Settings applied to the current connection
+    private val _layout = MutableStateFlow("en-US")
+    val layout: StateFlow<String> = _layout.asStateFlow()
+
+    private val _targetOs = MutableStateFlow("other")
+    val targetOs: StateFlow<String> = _targetOs.asStateFlow()
+
+    fun startScan() = bleManager.startScan()
+    fun stopScan()  = bleManager.stopScan()
+
+    fun setPermissionDenied() {
+        _statusMessage.value = "Bluetooth permission denied. Grant it in app settings."
+    }
+
+    fun connectToDevice(device: BluetoothDevice, config: DeviceConfig) {
+        val crypto = CryptoManager(config.pskBytes)
+        cryptoManager = crypto
+        activeDevice = config
+        viewModelScope.launch {
+            try {
+                _isBusy.value = true
+                bleManager.connect(device, crypto)
+                // Apply saved settings before signalling Connected so the UI is never
+                // interactive with stale firmware state, and user-triggered Apply calls
+                // cannot race with these post-connect writes.
+                bleManager.setLayout(config.layout, crypto)
+                bleManager.setOs(config.targetOs, crypto)
+                bleManager.setDelay(config.minHoldMs, config.maxHoldMs, config.minGapMs, config.maxGapMs, crypto)
+                _layout.value = config.layout
+                _targetOs.value = config.targetOs
+                // Only now tell the UI the device is ready.
+                bleManager.markReady()
+                _statusMessage.value = "Connected to ${config.bleName}"
+            } catch (e: Exception) {
+                // Ensure GATT is closed and state is clean if settings application fails
+                // after a successful BLE connect (e.g. write timeout mid-config).
+                bleManager.disconnect()
+                _statusMessage.value = "Error: ${e.message}"
+            } finally {
+                _isBusy.value = false
+            }
+        }
+    }
+
+    fun connectToDefaultDevice(device: BluetoothDevice) =
+        connectToDevice(device, repository.getDefaultDeviceOrStored())
+
+    fun disconnect() = bleManager.disconnect()
+
+    fun sendText(text: String) {
+        val crypto = cryptoManager ?: return
+        viewModelScope.launch {
+            try {
+                _isBusy.value = true
+                bleManager.sendText(text, crypto)
+            } catch (e: Exception) {
+                _statusMessage.value = "Send error: ${e.message}"
+            } finally {
+                _isBusy.value = false
+            }
+        }
+    }
+
+    fun runScript(scriptText: String) {
+        val crypto = cryptoManager ?: return
+        val device = activeDevice
+        viewModelScope.launch {
+            try {
+                _isBusy.value = true
+                val ctx = if (device != null) {
+                    ScriptContext(device.minHoldMs, device.maxHoldMs, device.minGapMs, device.maxGapMs)
+                } else ScriptContext()
+                runScript(scriptText, bleManager, crypto, ctx)
+                // Restore saved settings — script commands like SET_MIN_DELAY may have
+                // changed them on the ESP32 for the duration of the script.
+                if (device != null) {
+                    bleManager.setLayout(device.layout, crypto)
+                    bleManager.setOs(device.targetOs, crypto)
+                    bleManager.setDelay(device.minHoldMs, device.maxHoldMs, device.minGapMs, device.maxGapMs, crypto)
+                }
+                _statusMessage.value = "Script completed"
+            } catch (e: Exception) {
+                _statusMessage.value = "Script error: ${e.message}"
+            } finally {
+                _isBusy.value = false
+            }
+        }
+    }
+
+    fun setLayout(layout: String) {
+        val crypto = cryptoManager ?: return
+        viewModelScope.launch {
+            try {
+                bleManager.setLayout(layout, crypto)
+                _layout.value = layout
+                activeDevice?.let { dev ->
+                    repository.save(dev.copy(layout = layout))
+                    activeDevice = dev.copy(layout = layout)
+                }
+            } catch (e: Exception) {
+                _statusMessage.value = "Layout error: ${e.message}"
+            }
+        }
+    }
+
+    fun setTargetOs(os: String) {
+        val crypto = cryptoManager ?: return
+        viewModelScope.launch {
+            try {
+                bleManager.setOs(os, crypto)
+                _targetOs.value = os
+                activeDevice?.let { dev ->
+                    repository.save(dev.copy(targetOs = os))
+                    activeDevice = dev.copy(targetOs = os)
+                }
+            } catch (e: Exception) {
+                _statusMessage.value = "OS error: ${e.message}"
+            }
+        }
+    }
+
+    fun setDelay(minHoldMs: Int, maxHoldMs: Int, minGapMs: Int, maxGapMs: Int) {
+        val crypto = cryptoManager ?: return
+        viewModelScope.launch {
+            try {
+                bleManager.setDelay(minHoldMs, maxHoldMs, minGapMs, maxGapMs, crypto)
+                activeDevice?.let { dev ->
+                    val updated = dev.copy(
+                        minHoldMs = minHoldMs, maxHoldMs = maxHoldMs,
+                        minGapMs = minGapMs, maxGapMs = maxGapMs
+                    )
+                    repository.save(updated)
+                    activeDevice = updated
+                }
+            } catch (e: Exception) {
+                _statusMessage.value = "Delay error: ${e.message}"
+            }
+        }
+    }
+
+    fun provision(newBleName: String, newPskHex: String, newAlias: String, onProvisioned: () -> Unit) {
+        val crypto = cryptoManager ?: return
+        viewModelScope.launch {
+            try {
+                _isBusy.value = true
+                val newPsk = newPskHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                bleManager.provision(newBleName, newPsk, crypto)
+                // Save updated config; device will reboot with the new name
+                val updated = DeviceConfig(
+                    alias = newAlias,
+                    bleName = newBleName,
+                    pskHex = newPskHex,
+                    layout = activeDevice?.layout ?: "en-US",
+                    targetOs = activeDevice?.targetOs ?: "other",
+                )
+                repository.save(updated)
+                activeDevice?.alias?.let { old ->
+                    if (old != newAlias) repository.delete(old)
+                }
+                activeDevice = null
+                cryptoManager = null
+                onProvisioned()
+            } catch (e: Exception) {
+                _statusMessage.value = "Provision error: ${e.message}"
+            } finally {
+                _isBusy.value = false
+            }
+        }
+    }
+
+    fun factoryReset(onComplete: () -> Unit) {
+        val crypto = cryptoManager ?: return
+        viewModelScope.launch {
+            try {
+                _isBusy.value = true
+                bleManager.factoryReset(crypto)
+                // Device reverts to default name/PSK — remove the saved config
+                activeDevice?.alias?.let { repository.delete(it) }
+                activeDevice = null
+                cryptoManager = null
+                _statusMessage.value = "Factory reset sent. Device is rebooting to defaults."
+                onComplete()
+            } catch (e: Exception) {
+                _statusMessage.value = "Factory reset error: ${e.message}"
+            } finally {
+                _isBusy.value = false
+            }
+        }
+    }
+
+    fun clearStatus() {
+        _statusMessage.value = null
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        bleManager.disconnect()
+    }
+}
