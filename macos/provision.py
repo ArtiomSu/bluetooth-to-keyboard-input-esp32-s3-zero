@@ -114,8 +114,11 @@ async def provision(
             raise ValueError(f"New BLE name must be 1–32 bytes (got {len(name_bytes)})")
         payload = bytes([len(name_bytes)]) + name_bytes + new_psk
 
-        # Authenticate the payload with the CURRENT PSK via hmac_wrap.
-        packet = hmac_wrap(payload)
+        # Two-layer protection:
+        #   HMAC  — authenticates with current PSK (only holder can provision)
+        #   ECIES — encrypts so the new PSK never travels in the clear over BLE
+        #           and provides a replay counter via the session sequence number
+        packet = encrypt_payload(hmac_wrap(payload), esp32_pubkey)
 
         print(f"[Provision] Sending new name={new_name!r}, new_psk={new_psk.hex()}")
         try:
@@ -198,8 +201,13 @@ def main() -> None:
             device = await find_device(ble_name)
             async with BleakClient(device) as client:
                 _send_ble_module._reset_counter()
-                # Send payload: HMAC(psk, b"\x00") + b"\x00"  (name_len=0 → factory reset)
-                packet = hmac_wrap(b"\x00")
+                _send_ble_module._last_completion = 0
+                _send_ble_module._notify_event = asyncio.Event()
+                await client.start_notify(READY_CHAR_UUID, _on_ready_notify)
+                # Factory-reset payload: ECIES_encrypt(hmac_wrap(b"\x00"))
+                # name_len=0 signals factory reset to the firmware.
+                esp32_pubkey = await get_esp32_pubkey(client)
+                packet = encrypt_payload(hmac_wrap(b"\x00"), esp32_pubkey)
                 print("[Provision] Sending factory-reset command…")
                 try:
                     await client.write_gatt_char(PROVISION_CHAR_UUID, packet, response=True)

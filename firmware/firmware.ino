@@ -619,16 +619,27 @@ static bool decryptPayload(const uint8_t *pkt, size_t pktLen, char *out, size_t 
 }
 
 // ── BLE provisioning characteristic callback ────────────────────────────────
-// Payload after HMAC(currentPSK, …) strip:
-//   [name_len : 1 byte][name : name_len bytes (1–32)][new_psk : 32 bytes]
-// The entire write is authenticated with the *current* PSK so only a client
-// that already knows the secret can change the name or PSK.
+// Wire format: ECIES_encrypt(counter + HMAC-SHA256(currentPSK, inner) + inner)
+//   where inner = [name_len : 1 byte][name : name_len bytes (1–32)][new_psk : 32 bytes]
+//              or [0x00] for factory reset
+//
+// Two-layer protection:
+//   • ECIES  — confidentiality (new PSK never travels in the clear) + replay counter
+//   • HMAC   — PSK authentication (only someone with the current PSK can provision)
 class ProvisionCallbacks : public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pChar) override {
         String raw = pChar->getValue();
+        if ((size_t)raw.length() < (size_t)CRYPTO_OVERHEAD) return;
+
+        // 1. ECIES decrypt — also checks the per-session replay counter.
+        char plaintext[MAX_STR];
+        size_t plainLen = 0;
+        if (!decryptPayload((const uint8_t *)raw.c_str(), raw.length(), plaintext, plainLen)) return;
+
+        // 2. Verify PSK-HMAC on the decrypted payload.
         size_t valueLen = 0;
         const uint8_t *payload = verifyPskHmac(
-            (const uint8_t *)raw.c_str(), raw.length(), &valueLen);
+            (const uint8_t *)plaintext, plainLen, &valueLen);
         if (!payload) return;  // bad HMAC — reject silently
 
         // payload: [name_len:1][name:name_len][new_psk:32]

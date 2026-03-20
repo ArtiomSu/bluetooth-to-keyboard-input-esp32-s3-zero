@@ -4,6 +4,7 @@ source .venv/bin/activate
 
 MAIN_LAYOUT="en-GB"
 MAIN_OS="macos"
+DEVICE="home"
 
 function generate_pattern() {
     length=$1
@@ -41,8 +42,9 @@ function simple_test(){
     pattern="$1"
     layout="$2"
     os="$3"
+    device="$4"
     echo "Generated pattern: $pattern"
-    python send_ble.py --layout "$layout" --os "$os" --enter "$pattern"
+    python send_ble.py --device "$device" --layout "$layout" --os "$os" --enter "$pattern"
     # read input from stdin
     IFS= read -r input_data
     check_pattern "$input_data" "$pattern"
@@ -51,22 +53,22 @@ function simple_test(){
 function test_448(){
     # 447 + enter is the max chars we can send
     pattern_448=$(generate_pattern 447)
-    simple_test "$pattern_448" "$MAIN_LAYOUT" "$MAIN_OS"
+    simple_test "$pattern_448" "$MAIN_LAYOUT" "$MAIN_OS" "$DEVICE"
 }
 
 function test_896(){
     pattern_896=$(generate_pattern 895)
-    simple_test "$pattern_896" "$MAIN_LAYOUT" "$MAIN_OS"
+    simple_test "$pattern_896" "$MAIN_LAYOUT" "$MAIN_OS" "$DEVICE"
 }
 
 function test_full_uk_kb(){
     pattern="1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!@#\$%^&*()_+-=~\`[]{}|;:'\",.<>/?£€"
-    simple_test "$pattern" "en-GB" "$MAIN_OS" 
+    simple_test "$pattern" "en-GB" "$MAIN_OS" "$DEVICE"
 }
 
 function test_full_us_kb(){
     pattern="1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!@#\$%^&*()_+-=~\`[]{}|;:'\",.<>/?"
-    simple_test "$pattern" "en-US" "$MAIN_OS" 
+    simple_test "$pattern" "en-US" "$MAIN_OS" "$DEVICE"
 }
 
 function long_char_test(){
@@ -80,7 +82,7 @@ function long_char_test(){
     echo "Waiting for 5 seconds to allow you to open vim and get ready..."
     sleep 5
 
-    python send_ble.py --layout en-GB --os macos "$pattern"
+    python send_ble.py --device "$DEVICE" --layout en-GB --os macos "$pattern"
     
     echo "Save the file in vim and exit. You can do this by pressing Esc, then typing :wq and hitting Enter."
     read -n 1 -s -r -p "Press any key to continue..."
@@ -126,19 +128,19 @@ function script_tests(){
     echo "Run test_script.txt? y/n"
     read -p "Enter your choice: " choice
     if [[ "$choice" == "y" ]]; then
-        python send_ble.py --layout "$MAIN_LAYOUT" --os "$MAIN_OS" --script test_script.txt
+        python send_ble.py --device "$DEVICE" --layout "$MAIN_LAYOUT" --os "$MAIN_OS" --script test_script.txt
     fi
 
     echo "Run test_script_long.txt? y/n"
     read -p "Enter your choice: " choice
     if [[ "$choice" == "y" ]]; then
-        python send_ble.py --layout "$MAIN_LAYOUT" --os "$MAIN_OS" --script test_script_long.txt
+        python send_ble.py --device "$DEVICE" --layout "$MAIN_LAYOUT" --os "$MAIN_OS" --script test_script_long.txt
     fi
 
     echo "Run test_script_speed.txt? y/n"
     read -p "Enter your choice: " choice
     if [[ "$choice" == "y" ]]; then
-        python send_ble.py --layout "$MAIN_LAYOUT" --os "$MAIN_OS" --script test_script_speed.txt
+        python send_ble.py --device "$DEVICE" --layout "$MAIN_LAYOUT" --os "$MAIN_OS" --script test_script_speed.txt
     fi
 }
 
