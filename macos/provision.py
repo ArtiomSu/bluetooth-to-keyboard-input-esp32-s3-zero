@@ -34,6 +34,7 @@ import sys
 from pathlib import Path
 
 from bleak import BleakClient, BleakScanner
+from bleak.exc import BleakError
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
@@ -123,13 +124,12 @@ async def provision(
         print(f"[Provision] Sending new name={new_name!r}, new_psk={new_psk.hex()}")
         try:
             await client.write_gatt_char(PROVISION_CHAR_UUID, packet, response=True)
-        except Exception as exc:
-            # The ESP32 calls esp_restart() before it can send the GATT write
-            # response, so CoreBluetooth raises a "disconnected" error.  Any
-            # disconnect at this point means the write landed and the firmware
-            # is rebooting — treat it as success.
-            if "disconnected" not in str(exc).lower():
-                raise
+        except BleakError:
+            # The ESP32 calls esp_restart() before sending the GATT write response.
+            # CoreBluetooth (macOS) raises "disconnected"; BlueZ (Linux) raises
+            # "Not connected" or similar.  Any BleakError here means the write
+            # landed and the firmware is rebooting — treat it as success.
+            pass
         print("[Provision] Write accepted — ESP32 is restarting…")
 
     # The ESP32 restarts on receipt of a valid provisioning write; the BLE
@@ -211,9 +211,8 @@ def main() -> None:
                 print("[Provision] Sending factory-reset command…")
                 try:
                     await client.write_gatt_char(PROVISION_CHAR_UUID, packet, response=True)
-                except Exception as exc:
-                    if "disconnected" not in str(exc).lower():
-                        raise
+                except BleakError:
+                    pass  # firmware rebooted before sending ACK — expected
                 print("[Provision] Factory reset accepted — device is rebooting to defaults.")
 
         try:
