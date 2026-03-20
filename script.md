@@ -4,7 +4,7 @@ This supports the use of duckyscript like syntax for more complex behavior.
 
 All lines must start with a command
 
-See `macos/test_script*.txt` for full example scripts.
+See `desktop/test_script*.txt` for full example scripts.
 
 ### Basic Strings 
 

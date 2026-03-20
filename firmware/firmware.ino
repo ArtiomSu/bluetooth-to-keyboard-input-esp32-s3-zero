@@ -2,7 +2,7 @@
  * ESP32-S3 BLE → USB HID Keyboard Bridge
  *
  * The device advertises over BLE as "ESP32-KB".
- * A macOS client writes UTF-8 text to the BLE characteristic; the ESP32
+ * A client writes UTF-8 text to the BLE characteristic; the ESP32
  * immediately types that text out through its native USB HID interface.
  *
  * Arduino IDE board settings (ESP32-S3 Zero / Waveshare ESP32-S3 Zero):
@@ -44,7 +44,7 @@
 #include <Adafruit_NeoPixel.h>
 
 // ── BLE identifiers ──────────────────────────────────────────────────────────
-// Keep these in sync with the macOS script.
+// Keep these in sync with the desktop script.
 // DEVICE_NAME is no longer a compile-time constant — it is loaded from NVS at
 // boot (see deviceName[] below).  The default below is used on first flash.
 #define DEFAULT_DEVICE_NAME     "ESP32-KB"

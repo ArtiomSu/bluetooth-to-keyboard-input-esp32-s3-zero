@@ -1,10 +1,10 @@
 # bluetooth-to-keyboard-input-esp32-s3-zero
 
-Send text from macOS to an **ESP32-S3 Zero** over BLE; the ESP32 types it out
+Send text from your desktop (macOS, Linux, or Windows) to an **ESP32-S3 Zero** over BLE; the ESP32 types it out
 as a **USB HID keyboard** on whichever machine it is plugged into.
 
 ```
-macOS script ──BLE (encrypted)──► ESP32-S3 Zero ──USB HID──► any computer
+desktop script ──BLE (encrypted)──► ESP32-S3 Zero ──USB HID──► any computer
 ```
 
 Also supports a simple scripting language inspired by Ducky Script. See the Readme file [script.md](script.md) for details.
@@ -18,8 +18,8 @@ bluetooth-input/
 ├── firmware/
 │   ├── firmware.ino   ← Arduino sketch for the ESP32-S3
 │   └── keytypes.h     ← shared types (KeyLayout, KeyOS, KeyEntry)
-└── macos/
-    ├── send_ble.py      ← Python BLE client for macOS
+└── desktop/
+    ├── send_ble.py      ← Python BLE client (macOS, Linux, Windows)
     ├── script_runner.py ← ducky-script parser (used by send_ble.py --script)
     ├── provision.py     ← first-time setup, re-provisioning, and factory reset
     ├── list_devices.py  ← scan and display nearby BLE devices
@@ -187,19 +187,24 @@ default PSK is active.
 
 ---
 
-## 4 — Run the macOS script
+## 4 — Run the desktop script
 
 ### Install dependencies
 
 ```bash
-cd macos
+cd desktop
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-> macOS may ask for Bluetooth permission the first time you run the script.
+> **macOS** may ask for Bluetooth permission the first time you run the script.
 > Allow it in **System Settings → Privacy & Security → Bluetooth**.
+>
+> **Linux** requires BlueZ (`sudo apt install bluez`) and your user in the `bluetooth` group
+> (`sudo usermod -aG bluetooth $USER`, then re-login), or run with `sudo`.
+>
+> **Windows** requires no special setup — WinRT Bluetooth is used automatically.
 
 ### Specify your keyboard layout and target OS
 
@@ -270,12 +275,12 @@ Ctrl-C to disconnect.
 
 ### Running the test suite
 
-`macos/tests.sh` exercises the full send path and keyboard layouts. Run it
-from the `macos/` directory (the venv must already exist — see **Install
+`desktop/tests.sh` exercises the full send path and keyboard layouts. Run it
+from the `desktop/` directory (the venv must already exist — see **Install
 dependencies** above):
 
 ```bash
-cd macos
+cd desktop
 bash tests.sh
 ```
 
