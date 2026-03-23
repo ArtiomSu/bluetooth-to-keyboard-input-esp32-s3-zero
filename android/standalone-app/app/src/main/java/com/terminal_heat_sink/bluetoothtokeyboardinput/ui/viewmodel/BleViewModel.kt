@@ -10,6 +10,7 @@ import com.terminal_heat_sink.bluetoothtokeyboardinput.crypto.CryptoManager
 import com.terminal_heat_sink.bluetoothtokeyboardinput.data.DeviceConfig
 import com.terminal_heat_sink.bluetoothtokeyboardinput.data.DeviceRepository
 import com.terminal_heat_sink.bluetoothtokeyboardinput.script.ScriptContext
+import com.terminal_heat_sink.bluetoothtokeyboardinput.script.ScriptRepository
 import com.terminal_heat_sink.bluetoothtokeyboardinput.script.runScript
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -26,6 +27,7 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
     val connectionState: StateFlow<ConnectionState> = bleManager.connectionState
 
     val repository = DeviceRepository(application)
+    val scriptRepository = ScriptRepository(application)
 
     private val _statusMessage = MutableStateFlow<String?>(null)
     val statusMessage: StateFlow<String?> = _statusMessage.asStateFlow()
