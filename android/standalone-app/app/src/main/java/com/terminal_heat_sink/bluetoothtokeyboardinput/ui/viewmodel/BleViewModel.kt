@@ -1,17 +1,29 @@
 package com.terminal_heat_sink.bluetoothtokeyboardinput.ui.viewmodel
 
 import android.app.Application
+import android.app.NotificationManager
 import android.bluetooth.BluetoothDevice
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.viewModelScope
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleManager
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.ConnectionState
 import com.terminal_heat_sink.bluetoothtokeyboardinput.crypto.CryptoManager
 import com.terminal_heat_sink.bluetoothtokeyboardinput.data.DeviceConfig
 import com.terminal_heat_sink.bluetoothtokeyboardinput.data.DeviceRepository
+import com.terminal_heat_sink.bluetoothtokeyboardinput.notification.BleNotificationHelper
 import com.terminal_heat_sink.bluetoothtokeyboardinput.script.ScriptContext
 import com.terminal_heat_sink.bluetoothtokeyboardinput.script.ScriptRepository
 import com.terminal_heat_sink.bluetoothtokeyboardinput.script.runScript
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -46,6 +58,43 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
     private var mouseScrollPending = false
     private var pendingScrollV = 0
 
+    // ── Background disconnect timer ───────────────────────────────────────────
+    // Cancelled when the app returns to the foreground; fires after BACKGROUND_DISCONNECT_DELAY_MS.
+    private var backgroundDisconnectJob: Job? = null
+
+    // NotificationManager used to show/update/cancel the connection notification.
+    private val notificationManager =
+        getApplication<Application>().getSystemService(NotificationManager::class.java)
+
+    // BroadcastReceiver that handles the "Disconnect" action from the notification.
+    // Registered dynamically so it can reference this ViewModel directly.
+    private val disconnectReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == BleNotificationHelper.ACTION_DISCONNECT) disconnect()
+        }
+    }
+
+    // Observes the process lifecycle to detect app-level foreground/background transitions.
+    // ProcessLifecycleOwner is debounced — it only fires ON_STOP when ALL activities are stopped,
+    // so activity transitions (rotation, incoming calls) don't trigger a false background event.
+    private val processLifecycleObserver = object : DefaultLifecycleObserver {
+        override fun onStop(owner: LifecycleOwner) {
+            // App fully moved to background — start the idle disconnect timer.
+            if (connectionState.value is ConnectionState.Connected) {
+                backgroundDisconnectJob = viewModelScope.launch {
+                    delay(BACKGROUND_DISCONNECT_DELAY_MS)
+                    disconnect()
+                }
+            }
+        }
+
+        override fun onStart(owner: LifecycleOwner) {
+            // App returned to foreground — cancel any pending disconnect.
+            backgroundDisconnectJob?.cancel()
+            backgroundDisconnectJob = null
+        }
+    }
+
     // Device config selected by the user from the saved-devices list, used during scan/connect.
     // null means "new device" (use default PSK).
     private val _pendingConfig = MutableStateFlow<DeviceConfig?>(null)
@@ -53,6 +102,35 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectDeviceConfig(config: DeviceConfig?) {
         _pendingConfig.value = config
+    }
+
+    init {
+        BleNotificationHelper.createChannel(getApplication())
+
+        // Register the disconnect receiver (scoped to this process — no manifest entry needed).
+        val filter = IntentFilter(BleNotificationHelper.ACTION_DISCONNECT)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getApplication<Application>().registerReceiver(
+                disconnectReceiver, filter, Context.RECEIVER_NOT_EXPORTED
+            )
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            getApplication<Application>().registerReceiver(disconnectReceiver, filter)
+        }
+
+        ProcessLifecycleOwner.get().lifecycle.addObserver(processLifecycleObserver)
+
+        // Show/cancel the notification as the connection state changes.
+        viewModelScope.launch {
+            connectionState.collect { state ->
+                when (state) {
+                    is ConnectionState.Connected   -> updateNotification()
+                    is ConnectionState.Disconnected,
+                    is ConnectionState.Error       -> cancelNotification()
+                    else                           -> Unit
+                }
+            }
+        }
     }
 
     // Settings applied to the current connection
@@ -185,6 +263,7 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
                     repository.save(dev.copy(layout = layout))
                     activeDevice = dev.copy(layout = layout)
                 }
+                updateNotification()
             } catch (e: Exception) {
                 _statusMessage.value = "Layout error: ${e.message}"
             }
@@ -201,6 +280,7 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
                     repository.save(dev.copy(targetOs = os))
                     activeDevice = dev.copy(targetOs = os)
                 }
+                updateNotification()
             } catch (e: Exception) {
                 _statusMessage.value = "OS error: ${e.message}"
             }
@@ -348,8 +428,32 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun updateNotification() {
+        val device = activeDevice ?: return
+        val notification = BleNotificationHelper.buildNotification(
+            getApplication(),
+            device.bleName,
+            _layout.value,
+            _targetOs.value,
+        )
+        notificationManager.notify(BleNotificationHelper.NOTIFICATION_ID, notification)
+    }
+
+    private fun cancelNotification() {
+        notificationManager.cancel(BleNotificationHelper.NOTIFICATION_ID)
+    }
+
     override fun onCleared() {
         super.onCleared()
+        cancelNotification()
+        backgroundDisconnectJob?.cancel()
+        getApplication<Application>().unregisterReceiver(disconnectReceiver)
+        ProcessLifecycleOwner.get().lifecycle.removeObserver(processLifecycleObserver)
         bleManager.disconnect()
+    }
+
+    companion object {
+        /** Time in background before the connection is automatically dropped. */
+        const val BACKGROUND_DISCONNECT_DELAY_MS = 300_000L // 5 min
     }
 }
