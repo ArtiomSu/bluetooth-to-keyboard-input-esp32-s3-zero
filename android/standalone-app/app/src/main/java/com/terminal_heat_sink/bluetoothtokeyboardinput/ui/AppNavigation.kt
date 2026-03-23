@@ -3,6 +3,7 @@ package com.terminal_heat_sink.bluetoothtokeyboardinput.ui
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
@@ -22,6 +23,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.ConnectionState
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ui.screens.DevicesScreen
+import com.terminal_heat_sink.bluetoothtokeyboardinput.ui.screens.KeyboardScreen
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ui.screens.ProvisionScreen
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ui.screens.ScanScreen
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ui.screens.ScriptScreen
@@ -36,9 +38,10 @@ sealed class Screen(val route: String, val label: String) {
     object Script   : Screen("script",   "Script")
     object Settings : Screen("settings", "Settings")
     object Provision: Screen("provision","Provision")
+    object Keyboard : Screen("keyboard",  "Keyboard")
 }
 
-private val bottomNavItems = listOf(Screen.Send, Screen.Script, Screen.Settings)
+private val bottomNavItems = listOf(Screen.Send, Screen.Script, Screen.Keyboard, Screen.Settings)
 
 @Composable
 fun AppNavigation(
@@ -53,7 +56,8 @@ fun AppNavigation(
     // Return to Devices automatically if the ESP32 drops the connection unexpectedly
     // (e.g. powered off) while the user is on any connected screen.
     val connectedRoutes = setOf(
-        Screen.Send.route, Screen.Script.route, Screen.Settings.route, Screen.Provision.route
+        Screen.Send.route, Screen.Script.route, Screen.Keyboard.route,
+        Screen.Settings.route, Screen.Provision.route
     )
     LaunchedEffect(connectionState) {
         if (connectionState is ConnectionState.Disconnected && currentRoute in connectedRoutes) {
@@ -64,7 +68,8 @@ fun AppNavigation(
     }
 
     val showBottomNav = currentRoute in listOf(
-        Screen.Send.route, Screen.Script.route, Screen.Settings.route, Screen.Provision.route
+        Screen.Send.route, Screen.Script.route, Screen.Keyboard.route,
+        Screen.Settings.route, Screen.Provision.route
     )
 
     Scaffold(
@@ -85,9 +90,10 @@ fun AppNavigation(
                             },
                             icon = {
                                 when (screen) {
-                                    Screen.Send   -> Icon(Icons.Default.Send,     contentDescription = null)
-                                    Screen.Script -> Icon(Icons.Default.Edit,     contentDescription = null)
-                                    else          -> Icon(Icons.Default.Settings, contentDescription = null)
+                                    Screen.Send     -> Icon(Icons.Default.Send,     contentDescription = null)
+                                    Screen.Script   -> Icon(Icons.Default.Edit,     contentDescription = null)
+                                    Screen.Keyboard -> Icon(Icons.Default.Keyboard, contentDescription = null)
+                                    else            -> Icon(Icons.Default.Settings, contentDescription = null)
                                 }
                             },
                             label = { Text(screen.label) }
@@ -156,6 +162,9 @@ fun AppNavigation(
                         }
                     },
                 )
+            }
+            composable(Screen.Keyboard.route) {
+                KeyboardScreen(viewModel = viewModel)
             }
         }
     }

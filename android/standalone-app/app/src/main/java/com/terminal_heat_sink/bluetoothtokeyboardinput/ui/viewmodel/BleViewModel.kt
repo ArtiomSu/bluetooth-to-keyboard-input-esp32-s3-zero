@@ -93,6 +93,34 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
 
     fun disconnect() = bleManager.disconnect()
 
+    /**
+     * Fire-and-forget single key tap. Does NOT set isBusy so the keyboard UI stays responsive.
+     * Multiple rapid taps queue on the BleManager's opMutex and are sent in order.
+     */
+    fun tapKey(hidCode: Int) {
+        val crypto = cryptoManager ?: return
+        viewModelScope.launch {
+            try {
+                bleManager.sendKeyTap(hidCode, crypto)
+            } catch (e: Exception) {
+                _statusMessage.value = "Key error: ${e.message}"
+            }
+        }
+    }
+
+    /** Toggle a sticky modifier on the firmware side. */
+    fun toggleModifier(mask: Int, active: Boolean) {
+        val crypto = cryptoManager ?: return
+        viewModelScope.launch {
+            try {
+                if (active) bleManager.sendModDown(mask, crypto)
+                else bleManager.sendModUp(mask, crypto)
+            } catch (e: Exception) {
+                _statusMessage.value = "Modifier error: ${e.message}"
+            }
+        }
+    }
+
     fun sendText(text: String) {
         val crypto = cryptoManager ?: return
         viewModelScope.launch {
