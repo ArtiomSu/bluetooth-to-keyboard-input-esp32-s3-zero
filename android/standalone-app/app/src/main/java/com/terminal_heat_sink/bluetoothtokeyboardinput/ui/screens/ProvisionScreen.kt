@@ -1,6 +1,7 @@
 package com.terminal_heat_sink.bluetoothtokeyboardinput.ui.screens
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -34,6 +35,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
+import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ui.viewmodel.BleViewModel
 import java.security.SecureRandom
 
@@ -44,9 +46,13 @@ fun ProvisionScreen(
     onBack: () -> Unit,
     onProvisioned: () -> Unit,
 ) {
-    var newAlias   by rememberSaveable { mutableStateOf(viewModel.activeDevice?.alias   ?: "") }
-    var newBleName by rememberSaveable { mutableStateOf(viewModel.activeDevice?.bleName  ?: "") }
-    var newPskHex  by rememberSaveable { mutableStateOf(viewModel.activeDevice?.pskHex   ?: generateRandomPskHex()) }
+    var newAlias        by rememberSaveable { mutableStateOf(viewModel.activeDevice?.alias   ?: "") }
+    var newBleName      by rememberSaveable { mutableStateOf(viewModel.activeDevice?.bleName  ?: "") }
+    var newPskHex       by rememberSaveable { mutableStateOf(viewModel.activeDevice?.pskHex   ?: generateRandomPskHex()) }
+    var newVidHex       by rememberSaveable { mutableStateOf("%04X".format(viewModel.activeDevice?.usbVid ?: BleConstants.DEFAULT_USB_VID)) }
+    var newPidHex       by rememberSaveable { mutableStateOf("%04X".format(viewModel.activeDevice?.usbPid ?: BleConstants.DEFAULT_USB_PID)) }
+    var newManufacturer by rememberSaveable { mutableStateOf(viewModel.activeDevice?.usbManufacturerName ?: BleConstants.DEFAULT_USB_MANUFACTURER) }
+    var newSerial       by rememberSaveable { mutableStateOf(viewModel.activeDevice?.usbSerialNumber    ?: BleConstants.DEFAULT_USB_SERIAL) }
     val isBusy        by viewModel.isBusy.collectAsState()
     val statusMessage by viewModel.statusMessage.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -58,10 +64,13 @@ fun ProvisionScreen(
         }
     }
 
+    val vidValid = newVidHex.length == 4 && newVidHex.all { it.isDigit() || it.uppercaseChar() in 'A'..'F' }
+    val pidValid = newPidHex.length == 4 && newPidHex.all { it.isDigit() || it.uppercaseChar() in 'A'..'F' }
     val isValid = newAlias.isNotBlank()
         && newBleName.isNotBlank()
         && newPskHex.length == 64
         && newPskHex.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }
+        && vidValid && pidValid && newManufacturer.isNotBlank()
 
     Scaffold(
         topBar = {
@@ -131,10 +140,61 @@ fun ProvisionScreen(
                 Text("Generate random PSK")
             }
 
+            Spacer(Modifier.height(12.dp))
+            Text("USB Identity", style = MaterialTheme.typography.labelLarge)
+            Spacer(Modifier.height(8.dp))
+
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = newVidHex,
+                    onValueChange = { newVidHex = it.uppercase().filter { c -> c.isLetterOrDigit() }.take(4) },
+                    label = { Text("VID (hex)") },
+                    singleLine = true,
+                    isError = newVidHex.isNotEmpty() && newVidHex.length != 4,
+                    modifier = Modifier.weight(1f),
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
+                )
+                OutlinedTextField(
+                    value = newPidHex,
+                    onValueChange = { newPidHex = it.uppercase().filter { c -> c.isLetterOrDigit() }.take(4) },
+                    label = { Text("PID (hex)") },
+                    singleLine = true,
+                    isError = newPidHex.isNotEmpty() && newPidHex.length != 4,
+                    modifier = Modifier.weight(1f),
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
+                )
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            OutlinedTextField(
+                value = newManufacturer,
+                onValueChange = { newManufacturer = it.take(64) },
+                label = { Text("Manufacturer name") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None),
+            )
+
+            Spacer(Modifier.height(12.dp))
+
+            OutlinedTextField(
+                value = newSerial,
+                onValueChange = { newSerial = it.take(64) },
+                label = { Text("Serial number (optional)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None),
+            )
+
             Spacer(Modifier.height(16.dp))
 
             Button(
-                onClick = { viewModel.provision(newBleName, newPskHex, newAlias, onProvisioned) },
+                onClick = {
+                    val vid = newVidHex.toInt(16)
+                    val pid = newPidHex.toInt(16)
+                    viewModel.provision(newBleName, newPskHex, newAlias, vid, pid, newManufacturer, newSerial, onProvisioned)
+                },
                 enabled = isValid && !isBusy,
                 modifier = Modifier.fillMaxWidth(),
             ) {

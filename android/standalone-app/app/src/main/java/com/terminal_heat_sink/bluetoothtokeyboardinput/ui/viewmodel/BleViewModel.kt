@@ -226,20 +226,26 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun provision(newBleName: String, newPskHex: String, newAlias: String, onProvisioned: () -> Unit) {
+    fun provision(newBleName: String, newPskHex: String, newAlias: String,
+                  usbVid: Int, usbPid: Int, usbManufacturerName: String, usbSerialNumber: String,
+                  onProvisioned: () -> Unit) {
         val crypto = cryptoManager ?: return
         viewModelScope.launch {
             try {
                 _isBusy.value = true
                 val newPsk = newPskHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-                bleManager.provision(newBleName, newPsk, crypto)
-                // Save updated config; device will reboot with the new name
+                bleManager.provision(newBleName, newPsk, usbVid, usbPid, usbManufacturerName, usbSerialNumber, crypto)
+                // Save updated config; device will reboot with the new identity
                 val updated = DeviceConfig(
-                    alias = newAlias,
-                    bleName = newBleName,
-                    pskHex = newPskHex,
-                    layout = activeDevice?.layout ?: "en-US",
-                    targetOs = activeDevice?.targetOs ?: "other",
+                    alias              = newAlias,
+                    bleName            = newBleName,
+                    pskHex             = newPskHex,
+                    layout             = activeDevice?.layout     ?: "en-US",
+                    targetOs           = activeDevice?.targetOs   ?: "other",
+                    usbVid             = usbVid,
+                    usbPid             = usbPid,
+                    usbManufacturerName = usbManufacturerName,
+                    usbSerialNumber    = usbSerialNumber,
                 )
                 repository.save(updated)
                 activeDevice?.alias?.let { old ->

@@ -21,6 +21,10 @@ object BleConstants {
     val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
     const val DEFAULT_DEVICE_NAME = "ESP32-KB"
+    const val DEFAULT_USB_VID = 0x303A
+    const val DEFAULT_USB_PID = 0x1001
+    const val DEFAULT_USB_MANUFACTURER = "ESP32-S3"
+    const val DEFAULT_USB_SERIAL = ""
     const val DEFAULT_PSK_HEX =
         "a3f1c8e2b5d4079612fe3a8bc9e05d7f" +
         "4162ab90c8e3d5f617284a9b3c06e1f2"

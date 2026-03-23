@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-provision.py — Set the BLE name and PSK on an ESP32-S3 keyboard bridge.
+"""provision.py — Set the BLE name, PSK, and USB identity on an ESP32-S3 keyboard bridge.
 
 Usage:
     # First-time setup (device still uses factory defaults):
@@ -9,16 +8,14 @@ Usage:
     # Re-provision an already-configured device:
     python provision.py --device office-desk --new-alias office-desk --new-name "ESP32-KB-office"
 
-    # Change both name and generate a fresh random PSK:
-    python provision.py --device office-desk --new-alias office-desk --new-name "ESP32-KB-office"
-
-    # Use an explicit PSK instead of generating one:
+    # Set custom USB VID/PID and manufacturer name:
     python provision.py --device office-desk --new-alias office-desk \\
-        --new-name "ESP32-KB-office" --new-psk a3f1c8e2...
+        --new-name "ESP32-KB-office" \\
+        --usb-vid 0x1234 --usb-pid 0x5678 --usb-manufacturer "ACME Corp" --usb-serial "SN-001"
 
     After provisioning the ESP32 restarts automatically and advertises under
     the new name.  The config file (~/.bluetooth-input/devices.json) is
-    updated with the new alias, BLE name, and PSK.
+    updated with the new alias, BLE name, PSK, and USB identity.
 
 Requires:
     pip install bleak cryptography
@@ -74,14 +71,25 @@ from send_ble import (
 import send_ble as _send_ble_module
 
 
+# Default USB identity — mirrors firmware defaults.
+_DEFAULT_USB_VID = 0x303A
+_DEFAULT_USB_PID = 0x1001
+_DEFAULT_USB_MANUFACTURER = "ArtiomSu"
+_DEFAULT_USB_SERIAL       = ""
+
+
 async def provision(
     current_ble_name: str,
     current_psk: bytes,
     new_name: str,
     new_psk: bytes,
+    usb_vid: int = _DEFAULT_USB_VID,
+    usb_pid: int = _DEFAULT_USB_PID,
+    usb_manufacturer: str = _DEFAULT_USB_MANUFACTURER,
+    usb_serial: str = _DEFAULT_USB_SERIAL,
 ) -> None:
     """Connect to *current_ble_name*, authenticate with *current_psk*, and
-    write the provisioning characteristic to update the name and PSK."""
+    write the provisioning characteristic to update the name, PSK, and USB identity."""
 
     # Override the module-level PSK so hmac_wrap() uses the right key.
     _send_ble_module.PSK = current_psk
@@ -109,26 +117,34 @@ async def provision(
         esp32_pubkey = await get_esp32_pubkey(client)
 
         # Build provisioning payload:
-        #   [name_len : 1][name : name_len][new_psk : 32]
-        name_bytes = new_name.encode("utf-8")
-        if len(name_bytes) < 1 or len(name_bytes) > 32:
-            raise ValueError(f"New BLE name must be 1–32 bytes (got {len(name_bytes)})")
-        payload = bytes([len(name_bytes)]) + name_bytes + new_psk
+        #   [name_len:1][name][new_psk:32][vid:2 BE][pid:2 BE][mfr_len:1][mfr][serial_len:1][serial]
+        name_bytes  = new_name.encode("utf-8")
+        mfr_bytes   = usb_manufacturer.encode("utf-8")[:64]
+        serial_bytes = usb_serial.encode("utf-8")[:64]
+        if not 1 <= len(name_bytes) <= 64:
+            raise ValueError(f"New BLE name must be 1–64 bytes (got {len(name_bytes)})")
+        payload = (
+            bytes([len(name_bytes)]) + name_bytes
+            + new_psk
+            + struct.pack(">HH", usb_vid & 0xFFFF, usb_pid & 0xFFFF)
+            + bytes([len(mfr_bytes)]) + mfr_bytes
+            + bytes([len(serial_bytes)]) + serial_bytes
+        )
 
         # Two-layer protection:
         #   HMAC  — authenticates with current PSK (only holder can provision)
-        #   ECIES — encrypts so the new PSK never travels in the clear over BLE
-        #           and provides a replay counter via the session sequence number
+        #   ECIES — encrypts so the new PSK / USB identity never travels in the clear
         packet = encrypt_payload(hmac_wrap(payload), esp32_pubkey)
 
-        print(f"[Provision] Sending new name={new_name!r}, new_psk={new_psk.hex()}")
+        print(
+            f"[Provision] Sending name={new_name!r}, psk={new_psk.hex()}, "
+            f"VID=0x{usb_vid:04X}, PID=0x{usb_pid:04X}, "
+            f"manufacturer={usb_manufacturer!r}, serial={usb_serial!r}"
+        )
         try:
             await client.write_gatt_char(PROVISION_CHAR_UUID, packet, response=True)
         except BleakError:
             # The ESP32 calls esp_restart() before sending the GATT write response.
-            # CoreBluetooth (macOS) raises "disconnected"; BlueZ (Linux) raises
-            # "Not connected" or similar.  Any BleakError here means the write
-            # landed and the firmware is rebooting — treat it as success.
             pass
         print("[Provision] Write accepted — ESP32 is restarting…")
 
@@ -165,6 +181,31 @@ def main() -> None:
         default=None,
         help="New 32-byte PSK as 64 hex characters. "
              "If omitted, a fresh random PSK is generated.",
+    )
+    parser.add_argument(
+        "--usb-vid",
+        metavar="HEX_OR_INT",
+        default=None,
+        help="USB Vendor ID for the device (e.g. 0x1234 or 4660). "
+             f"Default: 0x{_DEFAULT_USB_VID:04X} (Espressif).",
+    )
+    parser.add_argument(
+        "--usb-pid",
+        metavar="HEX_OR_INT",
+        default=None,
+        help=f"USB Product ID (e.g. 0x5678 or 22136). Default: 0x{_DEFAULT_USB_PID:04X}.",
+    )
+    parser.add_argument(
+        "--usb-manufacturer",
+        metavar="STRING",
+        default=None,
+        help=f"USB manufacturer name string. Default: '{_DEFAULT_USB_MANUFACTURER}'.",
+    )
+    parser.add_argument(
+        "--usb-serial",
+        metavar="STRING",
+        default=None,
+        help="USB serial number string. Default: empty (not shown in OS).",
     )
     parser.add_argument(
         "--factory-reset",
@@ -244,6 +285,24 @@ def main() -> None:
         new_psk = os.urandom(32)
         print(f"[Provision] Generated new PSK: {new_psk.hex()}")
 
+    # Resolve USB identity (use stored values when re-provisioning, override with CLI args)
+    stored = load_config().get("devices", {}).get(args.device or "", {})
+    def _resolve_usb_int(arg_val: str | None, stored_key: str, default: int) -> int:
+        if arg_val is not None:
+            try:
+                return int(arg_val, 0)  # accepts 0x1234 or decimal
+            except ValueError:
+                print(f"[ERROR] Invalid USB id value: {arg_val!r}", file=sys.stderr)
+                sys.exit(1)
+        return stored.get(stored_key, default)
+
+    usb_vid          = _resolve_usb_int(args.usb_vid, "usb_vid", _DEFAULT_USB_VID)
+    usb_pid          = _resolve_usb_int(args.usb_pid, "usb_pid", _DEFAULT_USB_PID)
+    usb_manufacturer = args.usb_manufacturer if args.usb_manufacturer is not None \
+                       else stored.get("usb_manufacturer", _DEFAULT_USB_MANUFACTURER)
+    usb_serial       = args.usb_serial if args.usb_serial is not None \
+                       else stored.get("usb_serial", _DEFAULT_USB_SERIAL)
+
     new_name = args.new_name
 
     try:
@@ -252,6 +311,10 @@ def main() -> None:
             current_psk=current_psk,
             new_name=new_name,
             new_psk=new_psk,
+            usb_vid=usb_vid,
+            usb_pid=usb_pid,
+            usb_manufacturer=usb_manufacturer,
+            usb_serial=usb_serial,
         ))
     except (RuntimeError, ValueError) as e:
         print(f"[ERROR] {e}", file=sys.stderr)
@@ -262,6 +325,10 @@ def main() -> None:
     cfg.setdefault("devices", {})[args.new_alias] = {
         "ble_name": new_name,
         "psk": new_psk.hex(),
+        "usb_vid": usb_vid,
+        "usb_pid": usb_pid,
+        "usb_manufacturer": usb_manufacturer,
+        "usb_serial": usb_serial,
     }
     # If the alias changed, remove the old entry
     if args.device and args.device != args.new_alias and args.device in cfg["devices"]:

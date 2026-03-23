@@ -7,7 +7,11 @@ as a **USB HID keyboard** on whichever machine it is plugged into.
 desktop script ──BLE (encrypted)──► ESP32-S3 Zero ──USB HID──► any computer
 ```
 
-Also supports a simple scripting language inspired by Ducky Script. See the Readme file [script.md](script.md) for details.
+Supports a simple scripting language inspired by Ducky Script. See the Readme file [script.md](script.md) for details.
+
+Supports setting custom USB hid properties like vendor ID, product ID etc. that you can see with `ioreg -p IOUSB -l -w 0 | grep -A 20 -B 20 '"USB Product Name" = "b"'` on macOS.
+
+Supports mouse input (move, click, scroll) in addition to keyboard.
 
 ---
 
@@ -151,6 +155,36 @@ python provision.py --device office-desk --new-alias office-desk --new-name "ESP
 The `--device` flag selects which entry in `devices.json` to authenticate with.
 The device restarts automatically and the config is updated in place.
 
+### USB identity
+
+Each device exposes a configurable USB descriptor identity (VID, PID, manufacturer string, serial number).
+Pass any combination of the flags below during first-time provisioning **or** re-provisioning:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--usb-vid HEX` | `0x303A` | USB Vendor ID (Espressif default) |
+| `--usb-pid HEX` | `0x1001` | USB Product ID |
+| `--usb-manufacturer TEXT` | `ESP32-S3` | Manufacturer string (max 64 chars) |
+| `--usb-serial TEXT` | *(empty)* | Serial number string (max 64 chars) |
+
+Examples:
+
+```bash
+# First-time provisioning with custom USB identity
+python provision.py --new-alias office-desk --new-name "ESP32-KB-office" \
+    --usb-vid 0x1234 --usb-pid 0x5678 \
+    --usb-manufacturer "ACME Corp" --usb-serial "SN-001"
+
+# Change only the serial number on an existing device (other USB fields kept from stored config)
+python provision.py --device office-desk --new-alias office-desk --new-name "ESP32-KB-office" \
+    --usb-serial "SN-002"
+```
+
+When re-provisioning, any `--usb-*` flag you omit keeps its **currently stored** value from `devices.json`.
+
+The USB identity takes effect after the ESP32 restarts following provisioning.
+`firmwareVersion` is hardcoded in the firmware and cannot be changed over the air.
+
 ### Factory reset
 
 Wipes the NVS on the device (name and PSK revert to firmware defaults) and
@@ -175,11 +209,27 @@ default PSK is active.
 ```json
 {
   "devices": {
-    "office-desk": { "ble_name": "ESP32-KB-office", "psk": "a3f1c8e2..." },
-    "home-pc":     { "ble_name": "ESP32-KB-home",   "psk": "b4e2d9f1..." }
+    "office-desk": {
+      "ble_name": "ESP32-KB-office",
+      "psk": "a3f1c8e2...",
+      "usb_vid": 12346,
+      "usb_pid": 4097,
+      "usb_manufacturer": "ESP32-S3",
+      "usb_serial": ""
+    },
+    "home-pc": {
+      "ble_name": "ESP32-KB-home",
+      "psk": "b4e2d9f1...",
+      "usb_vid": 4660,
+      "usb_pid": 22136,
+      "usb_manufacturer": "ACME Corp",
+      "usb_serial": "SN-001"
+    }
   }
 }
 ```
+
+VID and PID are stored as decimal integers in JSON (e.g. `0x303A` → `12346`).
 
 > **If you don't provision**, `send_ble.py` (when run without `--device`)
 > connects to whatever device responds to the default name `ESP32-KB` using
@@ -320,7 +370,7 @@ The ESP32 exposes six characteristics under service `12340000-1234-1234-1234-123
 | `...0006...` | read/notify | Chunk-completion counter — firmware notifies after each chunk is typed |
 | `...0007...` | write | Keystroke delays — `[uint16 minHold][uint16 maxHold][uint16 minGap][uint16 maxGap]` big-endian ms (HMAC-authenticated) |
 | `...0008...` | write | Raw HID event — encrypted with ECIES; payload: `[1-byte type][optional 1-byte data]`. Types: `0x01` KEY_TAP, `0x02` MOD_DOWN, `0x03` MOD_UP, `0x04` MOD_CLEAR |
-| `...0009...` | write | Provisioning — `HMAC(currentPSK, [name_len:1][name][new_psk:32])`; ESP32 saves to NVS and restarts |
+| `...0009...` | write | Provisioning — `HMAC(currentPSK, inner)` where `inner = [name_len:1][name][new_psk:32][vid:2 BE][pid:2 BE][mfr_len:1][mfr][serial_len:1][serial]`; `name_len=0` triggers factory reset; ESP32 saves to NVS and restarts |
 
 ### Connection flow
 

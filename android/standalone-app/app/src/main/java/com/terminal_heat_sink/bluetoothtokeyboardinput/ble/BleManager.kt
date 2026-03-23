@@ -305,24 +305,41 @@ class BleManager(private val context: Context) {
         writeCharacteristic(CHAR_DELAY_UUID, crypto.hmacWrap(payload))
     }
 
-    suspend fun provision(newBleName: String, newPsk: ByteArray, crypto: CryptoManager) {
+    suspend fun provision(
+        newBleName: String,
+        newPsk: ByteArray,
+        usbVid: Int,
+        usbPid: Int,
+        usbManufacturerName: String,
+        usbSerialNumber: String,
+        crypto: CryptoManager,
+    ) {
         val pubkey = esp32PubkeyBytes ?: throw IllegalStateException("Not connected")
         val nameBytes = newBleName.toByteArray(Charsets.UTF_8)
-        require(nameBytes.size in 1..32) { "BLE name must be 1–32 bytes" }
+        require(nameBytes.size in 1..64) { "BLE name must be 1–64 bytes" }
         require(newPsk.size == 32) { "PSK must be 32 bytes" }
-        // inner = [name_len:1][name:name_len][new_psk:32]
-        val inner = ByteArray(1 + nameBytes.size + 32)
-        inner[0] = nameBytes.size.toByte()
-        nameBytes.copyInto(inner, 1)
-        newPsk.copyInto(inner, 1 + nameBytes.size)
-        // Wire format: ECIES_encrypt(counter + HMAC-SHA256(currentPSK, inner) + inner)
+        val mfrBytes    = usbManufacturerName.toByteArray(Charsets.UTF_8).take(64).toByteArray()
+        val serialBytes = usbSerialNumber.toByteArray(Charsets.UTF_8).take(64).toByteArray()
+        // inner = [name_len:1][name][new_psk:32][vid:2 BE][pid:2 BE][mfr_len:1][mfr][serial_len:1][serial]
+        val inner = ByteArray(1 + nameBytes.size + 32 + 2 + 2 + 1 + mfrBytes.size + 1 + serialBytes.size)
+        var i = 0
+        inner[i++] = nameBytes.size.toByte()
+        nameBytes.copyInto(inner, i); i += nameBytes.size
+        newPsk.copyInto(inner, i);    i += 32
+        inner[i++] = (usbVid shr 8).toByte()
+        inner[i++] = (usbVid and 0xFF).toByte()
+        inner[i++] = (usbPid shr 8).toByte()
+        inner[i++] = (usbPid and 0xFF).toByte()
+        inner[i++] = mfrBytes.size.toByte()
+        mfrBytes.copyInto(inner, i);    i += mfrBytes.size
+        inner[i++] = serialBytes.size.toByte()
+        serialBytes.copyInto(inner, i)
         val hmacWrapped = crypto.hmacWrap(inner)
         val packet = crypto.encryptPayload(hmacWrapped, pubkey)
         try {
             writeCharacteristic(CHAR_PROVISION_UUID, packet)
         } catch (_: Exception) {
-            // The ESP32 calls esp_restart() before sending the GATT write response,
-            // so the write will throw a disconnect error — this is expected and means success.
+            // ESP32 reboots before ACKing — expected.
         }
     }
 

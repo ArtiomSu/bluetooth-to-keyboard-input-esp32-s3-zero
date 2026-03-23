@@ -48,7 +48,12 @@
 // Keep these in sync with the desktop script.
 // DEVICE_NAME is no longer a compile-time constant — it is loaded from NVS at
 // boot (see deviceName[] below).  The default below is used on first flash.
-#define DEFAULT_DEVICE_NAME     "ESP32-KB"
+#define DEFAULT_DEVICE_NAME        "ESP32-KB"
+#define DEFAULT_USB_MANUFACTURER   "ArtiomSu"
+#define DEFAULT_USB_SERIAL         ""          // empty = no serial number shown
+#define DEFAULT_USB_VID            0x303A      // Espressif VID (default)
+#define DEFAULT_USB_PID            0x1001      // Generic HID
+#define FIRMWARE_VERSION           0x0100      // v1.0 — hardcoded, not configurable
 #define SERVICE_UUID            "12340000-1234-1234-1234-123456789abc"
 #define CHARACTERISTIC_UUID     "12340001-1234-1234-1234-123456789abc"
 #define LAYOUT_CHAR_UUID        "12340002-1234-1234-1234-123456789abc"  // write "en-US" or "en-GB"
@@ -81,10 +86,13 @@ static const uint8_t DEFAULT_PSK[32] = {
 };
 
 // ── Runtime identity — loaded from NVS at boot ───────────────────────────────
-// 32-char max name + null terminator.  Mutable: provisioning writes here then
-// saves to NVS and restarts.
-static uint8_t PSK[32];           // active PSK (loaded from NVS or DEFAULT_PSK)
-static char    deviceName[33];    // active BLE name (loaded from NVS or DEFAULT_DEVICE_NAME)
+// Mutable: provisioning writes here then saves to NVS and restarts.
+static uint8_t PSK[32];             // active PSK (loaded from NVS or DEFAULT_PSK)
+static char    deviceName[33];      // active BLE name (loaded from NVS or DEFAULT_DEVICE_NAME)
+static uint16_t usbVid;             // USB Vendor ID  (loaded from NVS or DEFAULT_USB_VID)
+static uint16_t usbPid;             // USB Product ID (loaded from NVS or DEFAULT_USB_PID)
+static char     usbManufacturer[65]; // USB manufacturer string (loaded from NVS or DEFAULT_USB_MANUFACTURER)
+static char     usbSerial[65];       // USB serial number string (loaded from NVS or DEFAULT_USB_SERIAL)
 
 // Preferences handle — opened read/write in loadIdentity(), read-only thereafter.
 static Preferences prefs;
@@ -123,6 +131,18 @@ static void loadIdentity() {
 
     // Mouse enable
     mouseEnabled = prefs.getBool("mouse", false);
+
+    // USB identity
+    usbVid = (uint16_t)prefs.getUInt("usb_vid", DEFAULT_USB_VID);
+    usbPid = (uint16_t)prefs.getUInt("usb_pid", DEFAULT_USB_PID);
+    {
+        String m = prefs.getString("usb_mfr", DEFAULT_USB_MANUFACTURER);
+        strncpy(usbManufacturer, m.c_str(), 64); usbManufacturer[64] = '\0';
+    }
+    {
+        String s = prefs.getString("usb_ser", DEFAULT_USB_SERIAL);
+        strncpy(usbSerial, s.c_str(), 64); usbSerial[64] = '\0';
+    }
 
     prefs.end();
 }
@@ -634,8 +654,11 @@ static bool decryptPayload(const uint8_t *pkt, size_t pktLen, char *out, size_t 
 
 // ── BLE provisioning characteristic callback ────────────────────────────────
 // Wire format: ECIES_encrypt(counter + HMAC-SHA256(currentPSK, inner) + inner)
-//   where inner = [name_len : 1 byte][name : name_len bytes (1–32)][new_psk : 32 bytes]
+//   where inner = [name_len:1][name:name_len][new_psk:32]
+//                 [vid_hi:1][vid_lo:1][pid_hi:1][pid_lo:1]
+//                 [mfr_len:1][mfr:mfr_len][serial_len:1][serial:serial_len]
 //              or [0x00] for factory reset
+// name, mfr, serial: UTF-8, 1–64 chars each (serial may be empty: serial_len==0)
 //
 // Two-layer protection:
 //   • ECIES  — confidentiality (new PSK never travels in the clear) + replay counter
@@ -664,24 +687,39 @@ class ProvisionCallbacks : public BLECharacteristicCallbacks {
             prefs.end();
             esp_restart();
         }
-        if (valueLen < 1 + 1 + 32) return;  // too short
+        // Minimum: name_len(1) + name(1+) + psk(32) + vid(2) + pid(2) + mfr_len(1) + serial_len(1) = 40+
+        if (valueLen < 1 + 1 + 32 + 2 + 2 + 1 + 1) return;
         uint8_t nameLen = payload[0];
-        if (nameLen < 1 || nameLen > 32) return;  // invalid name length
-        if (valueLen != (size_t)(1 + nameLen + 32)) return;  // length mismatch
+        if (nameLen < 1 || nameLen > 64) return;
+        size_t  offset = 1 + nameLen;
+        if (valueLen < offset + 32 + 2 + 2 + 1 + 1) return;
 
         const uint8_t *newNameBytes = payload + 1;
-        const uint8_t *newPsk       = payload + 1 + nameLen;
+        const uint8_t *newPsk       = payload + offset; offset += 32;
+        uint16_t newVid  = ((uint16_t)payload[offset] << 8) | payload[offset+1]; offset += 2;
+        uint16_t newPid  = ((uint16_t)payload[offset] << 8) | payload[offset+1]; offset += 2;
+        uint8_t  mfrLen  = payload[offset++];
+        if (mfrLen > 64 || valueLen < offset + mfrLen + 1) return;
+        const uint8_t *newMfr = payload + offset; offset += mfrLen;
+        uint8_t  serialLen = payload[offset++];
+        if (serialLen > 64 || valueLen < offset + serialLen) return;
+        const uint8_t *newSerial = payload + offset;
 
         // Persist to NVS
         prefs.begin("bt-kb", /*readOnly=*/false);
-        char nameBuf[33] = {};
+        char nameBuf[65] = {};
         memcpy(nameBuf, newNameBytes, nameLen);
         prefs.putString("name", nameBuf);
         prefs.putBytes("psk", newPsk, 32);
+        prefs.putUInt("usb_vid", newVid);
+        prefs.putUInt("usb_pid", newPid);
+        char mfrBuf[65] = {}; memcpy(mfrBuf, newMfr, mfrLen);
+        prefs.putString("usb_mfr", mfrBuf);
+        char serialBuf[65] = {}; memcpy(serialBuf, newSerial, serialLen);
+        prefs.putString("usb_ser", serialBuf);
         prefs.end();
 
-        // Restart so the new BLE name and PSK take effect cleanly.
-        // The BLE stack does not support renaming a live advertisement.
+        // Restart so the new BLE name, PSK, and USB identity take effect cleanly.
         esp_restart();
     }
 };
@@ -968,8 +1006,12 @@ void setup() {
     // setInterval(1) sets bInterval=1ms in the HID endpoint descriptor,
     // giving the USB host a 1000 Hz polling rate instead of the default ~4ms (250 Hz).
     // This is the maximum rate for USB Full Speed interrupt endpoints.
-    USB.productName(deviceName);      // shown in OS device manager
-    USB.manufacturerName("ESP32-S3");
+    USB.VID(usbVid);
+    USB.PID(usbPid);
+    USB.productName(deviceName);          // BLE name doubles as USB product name
+    USB.manufacturerName(usbManufacturer);
+    USB.firmwareVersion(FIRMWARE_VERSION); // v1.0 — hardcoded
+    if (usbSerial[0] != '\0') USB.serialNumber(usbSerial);
     Keyboard.begin();
     if (mouseEnabled) Mouse.begin();
     USB.begin();
