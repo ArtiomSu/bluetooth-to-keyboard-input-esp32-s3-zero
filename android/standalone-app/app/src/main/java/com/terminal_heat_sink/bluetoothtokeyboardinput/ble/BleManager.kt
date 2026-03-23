@@ -24,8 +24,15 @@ import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.CHAR_PUB
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.CHAR_RAW_UUID
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.CHAR_READY_UUID
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.CHAR_TEXT_UUID
+import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.CHAR_MOUSE_UUID
+import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.CHAR_MOUSE_EN_UUID
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.ECIES_OVERHEAD
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.EVENT_KEY_TAP
+import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.MOUSE_EVENT_BUTTON_CLICK
+import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.MOUSE_EVENT_BUTTON_DOWN
+import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.MOUSE_EVENT_BUTTON_UP
+import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.MOUSE_EVENT_MOVE
+import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.MOUSE_EVENT_SCROLL
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.EVENT_MOD_CLEAR
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.EVENT_MOD_DOWN
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.EVENT_MOD_UP
@@ -124,6 +131,8 @@ class BleManager(private val context: Context) {
             withTimeout(20_000L) { pendingConnect.await() }
             // Services already discovered inside gattCallback
             requestMtuAndWait()
+            // Request minimum connection interval (~7.5ms) for low-latency mouse input
+            gatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
             subscribeToReady()
             val pubkey = readCharacteristic(CHAR_PUBKEY_UUID)
             val sig    = readCharacteristic(CHAR_PUBKEY_SIG_UUID)
@@ -332,6 +341,79 @@ class BleManager(private val context: Context) {
             writeCharacteristic(CHAR_PROVISION_UUID, packet)
         } catch (_: Exception) {
             // ESP32 reboots before ACKing — expected.
+        }
+    }
+
+    // ── Mouse (raw, unencrypted) ──────────────────────────────────────────────
+
+    /**
+     * Write-without-response for low-latency mouse events.
+     * No ACK callback exists for WRITE_TYPE_NO_RESPONSE, so no mutex needed —
+     * the GATT layer queues these internally and they do not conflict with
+     * opMutex-guarded operations.
+     */
+    private fun writeCharacteristicNoResponse(uuid: java.util.UUID, value: ByteArray) {
+        val char = requireChar(uuid)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt?.writeCharacteristic(char, value, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
+        } else {
+            @Suppress("DEPRECATION")
+            char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            @Suppress("DEPRECATION")
+            char.value = value
+            @Suppress("DEPRECATION")
+            gatt?.writeCharacteristic(char)
+        }
+    }
+
+    /** Read the mouse-enabled flag from the firmware (CHAR_MOUSE_EN_UUID). */
+    suspend fun readMouseEnabled(): Boolean = try {
+        val value = readCharacteristic(CHAR_MOUSE_EN_UUID)
+        value.isNotEmpty() && value[0] != 0.toByte()
+    } catch (_: Exception) {
+        false  // Characteristic not found (old firmware) — default disabled
+    }
+
+    fun sendMouseMove(dx: Int, dy: Int) =
+        writeCharacteristicNoResponse(
+            CHAR_MOUSE_UUID,
+            byteArrayOf(MOUSE_EVENT_MOVE.toByte(), dx.toByte(), dy.toByte())
+        )
+
+    fun sendMouseScroll(vertical: Int, horizontal: Int) =
+        writeCharacteristicNoResponse(
+            CHAR_MOUSE_UUID,
+            byteArrayOf(MOUSE_EVENT_SCROLL.toByte(), vertical.toByte(), horizontal.toByte())
+        )
+
+    fun sendMouseButtonDown(buttons: Int) =
+        writeCharacteristicNoResponse(
+            CHAR_MOUSE_UUID,
+            byteArrayOf(MOUSE_EVENT_BUTTON_DOWN.toByte(), buttons.toByte())
+        )
+
+    fun sendMouseButtonUp(buttons: Int) =
+        writeCharacteristicNoResponse(
+            CHAR_MOUSE_UUID,
+            byteArrayOf(MOUSE_EVENT_BUTTON_UP.toByte(), buttons.toByte())
+        )
+
+    fun sendMouseClick(buttons: Int) =
+        writeCharacteristicNoResponse(
+            CHAR_MOUSE_UUID,
+            byteArrayOf(MOUSE_EVENT_BUTTON_CLICK.toByte(), buttons.toByte())
+        )
+
+    /**
+     * Authenticated toggle of mouse support on the firmware.
+     * Firmware saves to NVS and calls esp_restart(), so the write ACK will never arrive.
+     */
+    suspend fun setMouseEnabled(enabled: Boolean, crypto: CryptoManager) {
+        val payload = crypto.hmacWrap(byteArrayOf(if (enabled) 0x01 else 0x00))
+        try {
+            writeCharacteristic(CHAR_MOUSE_EN_UUID, payload)
+        } catch (_: Exception) {
+            // Device reboots before ACKing — expected.
         }
     }
 

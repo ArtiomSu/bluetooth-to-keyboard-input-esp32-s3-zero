@@ -14,6 +14,8 @@ object BleConstants {
     val CHAR_DELAY_UUID: UUID     = UUID.fromString("12340007-1234-1234-1234-123456789abc")
     val CHAR_RAW_UUID: UUID       = UUID.fromString("12340008-1234-1234-1234-123456789abc")
     val CHAR_PROVISION_UUID: UUID = UUID.fromString("12340009-1234-1234-1234-123456789abc")
+    val CHAR_MOUSE_UUID: UUID    = UUID.fromString("1234000A-1234-1234-1234-123456789abc")
+    val CHAR_MOUSE_EN_UUID: UUID = UUID.fromString("1234000B-1234-1234-1234-123456789abc")
 
     // Standard BLE descriptor for enabling notifications
     val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
@@ -33,6 +35,20 @@ object BleConstants {
     const val EVENT_MOD_DOWN: Byte   = 0x02
     const val EVENT_MOD_UP: Byte     = 0x03
     const val EVENT_MOD_CLEAR: Byte  = 0x04
+
+    // Raw mouse event type bytes (must match firmware)
+    const val MOUSE_EVENT_MOVE: Byte         = 0x10
+    const val MOUSE_EVENT_SCROLL: Byte       = 0x11
+    const val MOUSE_EVENT_BUTTON_DOWN: Byte  = 0x12
+    const val MOUSE_EVENT_BUTTON_UP: Byte    = 0x13
+    const val MOUSE_EVENT_BUTTON_CLICK: Byte = 0x14
+
+    // Mouse button bitmasks (must match firmware)
+    const val MOUSE_LEFT    = 0x01
+    const val MOUSE_RIGHT   = 0x02
+    const val MOUSE_MIDDLE  = 0x04
+    const val MOUSE_BACK    = 0x08
+    const val MOUSE_FORWARD = 0x10
 
     // Modifier bitmasks (must match MOD_* in firmware.ino)
     const val MOD_LSHIFT = 0x01

@@ -16,6 +16,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedButton
@@ -24,6 +25,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -35,6 +37,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants
@@ -49,6 +52,7 @@ fun SettingsScreen(
 ) {
     val currentLayout  by viewModel.layout.collectAsState()
     val currentOs      by viewModel.targetOs.collectAsState()
+    val mouseEnabled   by viewModel.mouseEnabled.collectAsState()
     val statusMessage  by viewModel.statusMessage.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -58,6 +62,8 @@ fun SettingsScreen(
     var minHold by remember { mutableFloatStateOf(viewModel.activeDevice?.minHoldMs?.toFloat() ?: 20f) }
     var maxHold by remember { mutableFloatStateOf(viewModel.activeDevice?.maxHoldMs?.toFloat() ?: 20f) }
     var showResetConfirm by remember { mutableStateOf(false) }
+    var showMouseConfirm by remember { mutableStateOf(false) }
+    var pendingMouseEnabled by remember { mutableStateOf(false) }
 
     LaunchedEffect(statusMessage) {
         statusMessage?.let {
@@ -124,6 +130,36 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(24.dp))
 
+            HorizontalDivider()
+            Spacer(Modifier.height(16.dp))
+
+            Text("Mouse Support", style = MaterialTheme.typography.labelLarge)
+            Spacer(Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Enable USB Mouse")
+                    Text(
+                        "Toggling restarts the device",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = mouseEnabled,
+                    onCheckedChange = { newValue ->
+                        pendingMouseEnabled = newValue
+                        showMouseConfirm = true
+                    },
+                )
+            }
+
+            HorizontalDivider()
+            Spacer(Modifier.height(16.dp))
+
             Button(
                 onClick = onProvisionClick,
                 modifier = Modifier.fillMaxWidth(),
@@ -149,6 +185,30 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(16.dp))
         }
+    }
+
+    if (showMouseConfirm) {
+        AlertDialog(
+            onDismissRequest = { showMouseConfirm = false },
+            title = { Text(if (pendingMouseEnabled) "Enable Mouse?" else "Disable Mouse?") },
+            text = {
+                Text(
+                    if (pendingMouseEnabled)
+                        "This will add USB mouse support to the device. It will restart automatically."
+                    else
+                        "This will remove USB mouse support. The device will restart automatically."
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showMouseConfirm = false
+                    viewModel.setMouseEnabled(pendingMouseEnabled)
+                }) { Text("Restart & Apply") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showMouseConfirm = false }) { Text("Cancel") }
+            },
+        )
     }
 
     if (showResetConfirm) {

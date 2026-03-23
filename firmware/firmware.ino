@@ -20,6 +20,7 @@
 
 #include "USB.h"
 #include "USBHIDKeyboard.h"
+#include "USBHIDMouse.h"
 
 #include <BLEDevice.h>
 #include <BLEServer.h>
@@ -58,6 +59,8 @@
 #define DELAY_CHAR_UUID         "12340007-1234-1234-1234-123456789abc"  // write: [uint16 minDelay][uint16 maxDelay] big-endian, in ms
 #define RAW_CHAR_UUID           "12340008-1234-1234-1234-123456789abc"  // write: encrypted raw HID event [1-byte type][optional data]
 #define PROVISION_CHAR_UUID     "12340009-1234-1234-1234-123456789abc"  // write: HMAC(curPSK, payload) + [name_len:1][name][new_psk:32]
+#define MOUSE_CHAR_UUID         "1234000A-1234-1234-1234-123456789abc"  // write: raw (unencrypted) mouse event [1-byte type][payload]
+#define MOUSE_EN_CHAR_UUID      "1234000B-1234-1234-1234-123456789abc"  // write: HMAC(PSK, [0x00|0x01]) to disable/enable mouse
 
 // Encrypted packet layout: [32 mac_pubkey][12 nonce][ciphertext][16 GCM tag]
 #define CRYPTO_OVERHEAD 60   // 32 + 12 + 16
@@ -86,6 +89,14 @@ static char    deviceName[33];    // active BLE name (loaded from NVS or DEFAULT
 // Preferences handle — opened read/write in loadIdentity(), read-only thereafter.
 static Preferences prefs;
 
+// ── Globals declared early (used by loadIdentity) ────────────────────────────
+USBHIDKeyboard Keyboard;
+USBHIDMouse    Mouse;
+
+// Mouse feature toggle — persisted to NVS key "mouse"; toggled via MOUSE_EN_CHAR.
+// When false, the MOUSE_CHAR characteristic accepts but silently drops all packets.
+static volatile bool mouseEnabled = false;
+
 /**
  * Load device identity (name + PSK) from NVS.  Falls back to compiled-in
  * defaults when the keys are absent (i.e. first flash).
@@ -110,11 +121,14 @@ static void loadIdentity() {
         deviceName[32] = '\0';
     }
 
+    // Mouse enable
+    mouseEnabled = prefs.getBool("mouse", false);
+
     prefs.end();
 }
 
 // ── Globals ───────────────────────────────────────────────────────────────────
-USBHIDKeyboard Keyboard;
+// (Keyboard, Mouse, and mouseEnabled are declared above loadIdentity().)
 
 // ── Onboard WS2812 RGB LED ───────────────────────────────────────────────────
 Adafruit_NeoPixel led(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -809,6 +823,69 @@ class RawEventCallbacks : public BLECharacteristicCallbacks {
     }
 };
 
+// ── BLE mouse event characteristic callback ──────────────────────────────────
+// Packets are raw (unencrypted) for low-latency operation.
+// Packet format: [1-byte type][payload]
+//   0x10  MOVE:         [int8 dx][int8 dy]
+//   0x11  SCROLL:       [int8 vertical][int8 horizontal]
+//   0x12  BUTTON_DOWN:  [uint8 buttons]   pressing, held until BUTTON_UP
+//   0x13  BUTTON_UP:    [uint8 buttons]
+//   0x14  BUTTON_CLICK: [uint8 buttons]   press + immediate release
+// Button bitmask: MOUSE_LEFT=0x01  MOUSE_RIGHT=0x02  MOUSE_MIDDLE=0x04
+//                 MOUSE_BACK=0x08  MOUSE_FORWARD=0x10
+class MouseCallbacks : public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pChar) override {
+        if (!mouseEnabled) return;
+        String val = pChar->getValue();
+        const uint8_t *data = (const uint8_t *)val.c_str();
+        size_t len = val.length();
+        if (len < 1) return;
+        switch (data[0]) {
+            case 0x10:  // MOVE: [int8 dx][int8 dy]
+                if (len < 3) return;
+                Mouse.move((int8_t)data[1], (int8_t)data[2], 0, 0);
+                break;
+            case 0x11:  // SCROLL: [int8 vertical][int8 horizontal]
+                if (len < 3) return;
+                Mouse.move(0, 0, (int8_t)data[1], (int8_t)data[2]);
+                break;
+            case 0x12:  // BUTTON_DOWN: [uint8 buttons]
+                if (len < 2) return;
+                Mouse.press(data[1]);
+                break;
+            case 0x13:  // BUTTON_UP: [uint8 buttons]
+                if (len < 2) return;
+                Mouse.release(data[1]);
+                break;
+            case 0x14:  // BUTTON_CLICK: [uint8 buttons]
+                if (len < 2) return;
+                Mouse.click(data[1]);
+                break;
+            default: return;  // unknown event type — drop
+        }
+    }
+};
+
+// ── BLE mouse-enable characteristic callback ─────────────────────────────────
+// Write HMAC(PSK, 0x00) to disable mouse; HMAC(PSK, 0x01) to enable.
+// The setting is persisted to NVS immediately so it survives power cycles.
+class MouseEnCallbacks : public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pChar) override {
+        String raw = pChar->getValue();
+        size_t valueLen = 0;
+        const uint8_t *value = verifyPskHmac(
+            (const uint8_t *)raw.c_str(), raw.length(), &valueLen);
+        if (!value || valueLen != 1) return;  // bad HMAC or wrong payload size — drop
+        mouseEnabled = (value[0] != 0);
+        prefs.begin("bt-kb", /*readOnly=*/false);
+        prefs.putBool("mouse", (bool)mouseEnabled);
+        prefs.end();
+        // USB descriptors are fixed at enumeration time — restart so the host
+        // sees the updated descriptor (keyboard-only or keyboard+mouse).
+        esp_restart();
+    }
+};
+
 // ── BLE server callbacks ──────────────────────────────────────────────────────
 class ServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer *pServer) override {
@@ -883,8 +960,18 @@ void setup() {
     led.show();
     xTaskCreate(ledTask, "led", 2048, nullptr, 1, nullptr);
 
-    // --- USB HID keyboard ---
+    // --- USB HID keyboard (+ mouse if enabled) ---
+    // Mouse.begin() must be called before USB.begin() to include the mouse
+    // HID descriptor in the USB device descriptor presented to the host.
+    // When mouse is disabled the host only sees a keyboard.
+    //
+    // setInterval(1) sets bInterval=1ms in the HID endpoint descriptor,
+    // giving the USB host a 1000 Hz polling rate instead of the default ~4ms (250 Hz).
+    // This is the maximum rate for USB Full Speed interrupt endpoints.
+    USB.productName(deviceName);      // shown in OS device manager
+    USB.manufacturerName("ESP32-S3");
     Keyboard.begin();
+    if (mouseEnabled) Mouse.begin();
     USB.begin();
 
     // --- BLE GATT server ---
@@ -989,6 +1076,26 @@ void setup() {
     static const uint8_t INIT_RDY = 0x01;
     pReady->setValue(&INIT_RDY, 1);
     gReadyChar = pReady;
+
+    // Mouse event characteristic — raw (unencrypted) write-only.
+    // Accepts events regardless of mouseEnabled; the callback does the gating.
+    BLECharacteristic *pMouse = pService->createCharacteristic(
+        MOUSE_CHAR_UUID,
+        BLECharacteristic::PROPERTY_WRITE |
+        BLECharacteristic::PROPERTY_WRITE_NR
+    );
+    pMouse->setCallbacks(new MouseCallbacks());
+
+    // Mouse-enable characteristic — authenticated toggle, persisted to NVS.
+    // Read value reflects current state: 0x00 = disabled, 0x01 = enabled.
+    BLECharacteristic *pMouseEn = pService->createCharacteristic(
+        MOUSE_EN_CHAR_UUID,
+        BLECharacteristic::PROPERTY_WRITE |
+        BLECharacteristic::PROPERTY_READ
+    );
+    pMouseEn->setCallbacks(new MouseEnCallbacks());
+    static uint8_t initMouseEn = mouseEnabled ? 0x01 : 0x00;
+    pMouseEn->setValue(&initMouseEn, 1);
 
     pService->start();
 

@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.Mouse
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
@@ -29,6 +30,7 @@ import com.terminal_heat_sink.bluetoothtokeyboardinput.ui.screens.ScanScreen
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ui.screens.ScriptScreen
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ui.screens.SendScreen
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ui.screens.SettingsScreen
+import com.terminal_heat_sink.bluetoothtokeyboardinput.ui.screens.TrackpadScreen
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ui.viewmodel.BleViewModel
 
 sealed class Screen(val route: String, val label: String) {
@@ -39,9 +41,10 @@ sealed class Screen(val route: String, val label: String) {
     object Settings : Screen("settings", "Settings")
     object Provision: Screen("provision","Provision")
     object Keyboard : Screen("keyboard",  "Keyboard")
+    object Trackpad : Screen("trackpad",  "Trackpad")
 }
 
-private val bottomNavItems = listOf(Screen.Send, Screen.Script, Screen.Keyboard, Screen.Settings)
+// bottomNavItems is built dynamically inside AppNavigation based on mouseEnabled state.
 
 @Composable
 fun AppNavigation(
@@ -52,11 +55,18 @@ fun AppNavigation(
     val navBackStack by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStack?.destination?.route
     val connectionState by viewModel.connectionState.collectAsState()
+    val mouseEnabled    by viewModel.mouseEnabled.collectAsState()
+
+    // Trackpad tab is shown only when the firmware has mouse support enabled.
+    val bottomNavItems = if (mouseEnabled)
+        listOf(Screen.Send, Screen.Script, Screen.Trackpad, Screen.Keyboard, Screen.Settings)
+    else
+        listOf(Screen.Send, Screen.Script, Screen.Keyboard, Screen.Settings)
 
     // Return to Devices automatically if the ESP32 drops the connection unexpectedly
     // (e.g. powered off) while the user is on any connected screen.
     val connectedRoutes = setOf(
-        Screen.Send.route, Screen.Script.route, Screen.Keyboard.route,
+        Screen.Send.route, Screen.Script.route, Screen.Keyboard.route, Screen.Trackpad.route,
         Screen.Settings.route, Screen.Provision.route
     )
     LaunchedEffect(connectionState) {
@@ -68,7 +78,7 @@ fun AppNavigation(
     }
 
     val showBottomNav = currentRoute in listOf(
-        Screen.Send.route, Screen.Script.route, Screen.Keyboard.route,
+        Screen.Send.route, Screen.Script.route, Screen.Keyboard.route, Screen.Trackpad.route,
         Screen.Settings.route, Screen.Provision.route
     )
 
@@ -92,6 +102,7 @@ fun AppNavigation(
                                 when (screen) {
                                     Screen.Send     -> Icon(Icons.Default.Send,     contentDescription = null)
                                     Screen.Script   -> Icon(Icons.Default.Edit,     contentDescription = null)
+                                    Screen.Trackpad -> Icon(Icons.Default.Mouse,    contentDescription = null)
                                     Screen.Keyboard -> Icon(Icons.Default.Keyboard, contentDescription = null)
                                     else            -> Icon(Icons.Default.Settings, contentDescription = null)
                                 }
@@ -165,6 +176,9 @@ fun AppNavigation(
             }
             composable(Screen.Keyboard.route) {
                 KeyboardScreen(viewModel = viewModel)
+            }
+            composable(Screen.Trackpad.route) {
+                TrackpadScreen(viewModel = viewModel)
             }
         }
     }

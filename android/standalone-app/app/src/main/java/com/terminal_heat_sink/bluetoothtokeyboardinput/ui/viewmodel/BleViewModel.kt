@@ -35,6 +35,17 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
     private val _isBusy = MutableStateFlow(false)
     val isBusy: StateFlow<Boolean> = _isBusy.asStateFlow()
 
+    // Mouse enabled — read from firmware on every connect; false until confirmed.
+    private val _mouseEnabled = MutableStateFlow(false)
+    val mouseEnabled: StateFlow<Boolean> = _mouseEnabled.asStateFlow()
+
+    // Accumulated deltas for in-flight mouse moves — merged into the next send.
+    private var mouseMovePending = false
+    private var pendingMoveX = 0
+    private var pendingMoveY = 0
+    private var mouseScrollPending = false
+    private var pendingScrollV = 0
+
     // Device config selected by the user from the saved-devices list, used during scan/connect.
     // null means "new device" (use default PSK).
     private val _pendingConfig = MutableStateFlow<DeviceConfig?>(null)
@@ -62,6 +73,7 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
         val crypto = CryptoManager(config.pskBytes)
         cryptoManager = crypto
         activeDevice = config
+        _mouseEnabled.value = false  // reset until confirmed by firmware read
         viewModelScope.launch {
             try {
                 _isBusy.value = true
@@ -74,6 +86,8 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
                 bleManager.setDelay(config.minHoldMs, config.maxHoldMs, config.minGapMs, config.maxGapMs, crypto)
                 _layout.value = config.layout
                 _targetOs.value = config.targetOs
+                // Read mouse-enabled state before making UI interactive.
+                _mouseEnabled.value = bleManager.readMouseEnabled()
                 // Only now tell the UI the device is ready.
                 bleManager.markReady()
                 _statusMessage.value = "Connected to ${config.bleName}"
@@ -264,6 +278,68 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearStatus() {
         _statusMessage.value = null
+    }
+
+    // ── Mouse ───────────────────────────────────────────────────────────
+
+    /**
+     * Relative mouse movement. If a send is already in-flight, accumulate the delta
+     * so it is included in the next send rather than lost.
+     */
+    fun sendMouseMove(dx: Int, dy: Int) {
+        pendingMoveX = (pendingMoveX + dx).coerceIn(-127, 127)
+        pendingMoveY = (pendingMoveY + dy).coerceIn(-127, 127)
+        if (pendingMoveX == 0 && pendingMoveY == 0) return
+        if (mouseMovePending) return
+        mouseMovePending = true
+        val sendX = pendingMoveX; pendingMoveX = 0
+        val sendY = pendingMoveY; pendingMoveY = 0
+        viewModelScope.launch {
+            try { bleManager.sendMouseMove(sendX, sendY) }
+            catch (_: Exception) { }
+            finally { mouseMovePending = false }
+        }
+    }
+
+    fun sendMouseScroll(vertical: Int, horizontal: Int) {
+        pendingScrollV = (pendingScrollV + vertical).coerceIn(-127, 127)
+        if (pendingScrollV == 0) return
+        if (mouseScrollPending) return
+        mouseScrollPending = true
+        val sendV = pendingScrollV; pendingScrollV = 0
+        viewModelScope.launch {
+            try { bleManager.sendMouseScroll(sendV, 0) }
+            catch (_: Exception) { }
+            finally { mouseScrollPending = false }
+        }
+    }
+
+    fun sendMouseButtonDown(buttons: Int) {
+        try { bleManager.sendMouseButtonDown(buttons) } catch (_: Exception) { }
+    }
+
+    fun sendMouseButtonUp(buttons: Int) {
+        try { bleManager.sendMouseButtonUp(buttons) } catch (_: Exception) { }
+    }
+
+    fun sendMouseClick(buttons: Int) {
+        try { bleManager.sendMouseClick(buttons) } catch (_: Exception) { }
+    }
+
+    /** Toggle mouse support on the firmware. Device reboots; disconnect handler navigates away. */
+    fun setMouseEnabled(enabled: Boolean) {
+        val crypto = cryptoManager ?: return
+        viewModelScope.launch {
+            try {
+                _isBusy.value = true
+                bleManager.setMouseEnabled(enabled, crypto)
+                _statusMessage.value = "Mouse ${if (enabled) "enabled" else "disabled"}. Device is restarting…"
+            } catch (e: Exception) {
+                _statusMessage.value = "Mouse toggle error: ${e.message}"
+            } finally {
+                _isBusy.value = false
+            }
+        }
     }
 
     override fun onCleared() {
