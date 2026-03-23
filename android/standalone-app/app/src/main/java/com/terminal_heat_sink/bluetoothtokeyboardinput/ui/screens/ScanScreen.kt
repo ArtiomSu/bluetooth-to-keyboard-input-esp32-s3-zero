@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -31,17 +32,22 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -49,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.ConnectionState
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.ScannedDevice
+import com.terminal_heat_sink.bluetoothtokeyboardinput.data.DeviceConfig
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ui.viewmodel.BleViewModel
 
 private fun requiredPermissions() =
@@ -80,6 +87,27 @@ fun ScanScreen(
     val isBusy          by viewModel.isBusy.collectAsState()
     val pendingConfig   by viewModel.pendingConfig.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+    var showPskDialog by remember { mutableStateOf(false) }
+    var pskDialogBleName by remember { mutableStateOf("") }
+
+    if (showPskDialog) {
+        val bleName = pskDialogBleName
+        EnterPskDialog(
+            bleName = bleName,
+            onDismiss = { showPskDialog = false },
+            onConfirm = { alias, pskHex ->
+                val config = DeviceConfig(
+                    alias = alias,
+                    bleName = bleName,
+                    pskHex = pskHex,
+                )
+                viewModel.repository.save(config)
+                viewModel.selectDeviceConfig(config)
+                showPskDialog = false
+                viewModel.startScan()
+            },
+        )
+    }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -176,6 +204,7 @@ fun ScanScreen(
                         items(devices, key = { it.address }) { scanned ->
                             ScanResultRow(scanned) {
                                 viewModel.stopScan()
+                                pskDialogBleName = scanned.name
                                 // Use saved config for this device if one is pending, else default PSK
                                 val config = pendingConfig
                                 if (config != null) {
@@ -191,10 +220,16 @@ fun ScanScreen(
             }
             connectionState is ConnectionState.Error -> {
                 val msg = (connectionState as ConnectionState.Error).message
-                ErrorState(padding, msg, onRetry = {
-                    if (context.allPermissionsGranted()) viewModel.startScan()
-                    else permissionLauncher.launch(requiredPermissions())
-                })
+                val isPskError = msg.contains("PSK mismatch", ignoreCase = true)
+                ErrorState(
+                    padding = padding,
+                    message = msg,
+                    onRetry = {
+                        if (context.allPermissionsGranted()) viewModel.startScan()
+                        else permissionLauncher.launch(requiredPermissions())
+                    },
+                    onEnterPsk = if (isPskError) { { showPskDialog = true } } else null,
+                )
             }
             else -> {
                 // Permissions denied / Bluetooth off / initial state
@@ -248,6 +283,7 @@ private fun ErrorState(
     padding: androidx.compose.foundation.layout.PaddingValues,
     message: String,
     onRetry: () -> Unit,
+    onEnterPsk: (() -> Unit)? = null,
 ) {
     Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(24.dp)) {
@@ -256,8 +292,79 @@ private fun ErrorState(
             Text(message, style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(16.dp))
             Button(onClick = onRetry, modifier = Modifier.fillMaxWidth()) { Text("Retry") }
+            if (onEnterPsk != null) {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = onEnterPsk, modifier = Modifier.fillMaxWidth()) {
+                    Text("This is my device — enter PSK")
+                }
+            }
         }
     }
+}
+
+@Composable
+private fun EnterPskDialog(
+    bleName: String,
+    onDismiss: () -> Unit,
+    onConfirm: (alias: String, pskHex: String) -> Unit,
+) {
+    var alias by remember { mutableStateOf("") }
+    var pskHex by remember { mutableStateOf("") }
+
+    val pskValid = pskHex.length == 64 && pskHex.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }
+    val aliasValid = alias.isNotBlank()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Save device") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = bleName,
+                    onValueChange = {},
+                    label = { Text("BLE name") },
+                    readOnly = true,
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = alias,
+                    onValueChange = { alias = it },
+                    label = { Text("Alias") },
+                    placeholder = { Text("e.g. office-desk") },
+                    singleLine = true,
+                    isError = alias.isNotEmpty() && !aliasValid,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = pskHex,
+                    onValueChange = { pskHex = it.lowercase().filter { c -> c.isDigit() || c in 'a'..'f' }.take(64) },
+                    label = { Text("PSK (64 hex chars)") },
+                    placeholder = { Text("a3f1c8e2…") },
+                    singleLine = true,
+                    isError = pskHex.isNotEmpty() && !pskValid,
+                    supportingText = {
+                        Text(
+                            "${pskHex.length}/64",
+                            color = if (pskValid) MaterialTheme.colorScheme.onSurfaceVariant
+                                    else MaterialTheme.colorScheme.error,
+                        )
+                    },
+                    textStyle = androidx.compose.ui.text.TextStyle(fontFamily = FontFamily.Monospace),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConfirm(alias.trim(), pskHex) },
+                enabled = aliasValid && pskValid,
+            ) { Text("Save & Connect") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
 }
 
 @Composable

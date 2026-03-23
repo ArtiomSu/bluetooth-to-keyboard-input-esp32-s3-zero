@@ -161,7 +161,12 @@ class BleManager(private val context: Context) {
             g.disconnect()
             // close() is called in onConnectionStateChange when STATE_DISCONNECTED arrives.
         } else {
-            _connectionState.value = ConnectionState.Disconnected
+            // Don't overwrite an Error state — connect() already closed GATT and set the error
+            // before throwing, and the ViewModel calls disconnect() in its catch block.
+            // Overwriting Error with Disconnected would discard the error message from the UI.
+            if (_connectionState.value !is ConnectionState.Error) {
+                _connectionState.value = ConnectionState.Disconnected
+            }
         }
     }
 
