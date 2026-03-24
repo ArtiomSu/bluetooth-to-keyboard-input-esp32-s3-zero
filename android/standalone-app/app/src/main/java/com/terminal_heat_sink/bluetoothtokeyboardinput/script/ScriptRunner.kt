@@ -38,6 +38,11 @@ suspend fun runScript(
     val ctx = initialContext.copy()
     val lines = scriptText.lines()
 
+    // Track the previous executable command so REPEAT can re-run it.
+    // REM, blank lines, and REPEAT itself never update these.
+    var prevCmd: String? = null
+    var prevRest: String? = null
+
     for ((index, rawLine) in lines.withIndex()) {
         // Check before starting each command so the current one always completes fully.
         if (stopRequested()) return
@@ -49,7 +54,25 @@ suspend fun runScript(
         val cmd  = if (spaceIdx < 0) line else line.substring(0, spaceIdx)
         val rest = if (spaceIdx < 0) "" else line.substring(spaceIdx + 1)
 
+        // Comments — never become the previous command.
+        if (cmd == "REM") continue
+
+        // REPEAT n — re-execute the previous command n more times.
+        if (cmd == "REPEAT") {
+            if (prevCmd == null) throw ScriptError("Line $lineno: REPEAT with no previous command")
+            val n = rest.trim().toIntOrNull()?.takeIf { it >= 1 }
+                ?: throw ScriptError("Line $lineno: REPEAT expects a positive integer, got '$rest'")
+            for (i in 1..n) {
+                if (stopRequested()) return
+                executeCommand(prevCmd, prevRest ?: "", lineno, ctx, ble, crypto)
+            }
+            // REPEAT does not replace the previous command.
+            continue
+        }
+
         executeCommand(cmd, rest, lineno, ctx, ble, crypto)
+        prevCmd = cmd
+        prevRest = rest
     }
 }
 
