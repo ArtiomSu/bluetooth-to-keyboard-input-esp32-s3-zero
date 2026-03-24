@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- BLE permissions -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="30" />
+
+    <!-- Required for BleService foreground service -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- API 34+: must declare the specific foreground service type -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- API 33+: required to show the foreground service notification -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+
+    <application
+        android:label="BtoKB Plugin"
+        android:theme="@style/Theme.BtoKBPlugin"
+        android:forceQueryable="true"
+        tools:targetApi="31">
+
+        <!--
+            K2A plugin: handles the three access-negotiation broadcasts
+            (TRIGGER_REQUEST_ACCESS / RECEIVE_ACCESS / REVOKE_ACCESS).
+            The KeePass2Android host discovers this receiver automatically
+            and manages the plugin access token lifecycle.
+        -->
+        <receiver
+            android:name="com.terminal_heat_sink.bluetoothtokeyboardinput.plugin.AccessReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="keepass2android.ACTION_TRIGGER_REQUEST_ACCESS" />
+                <action android:name="keepass2android.ACTION_RECEIVE_ACCESS" />
+                <action android:name="keepass2android.ACTION_REVOKE_ACCESS" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name="com.terminal_heat_sink.bluetoothtokeyboardinput.plugin.ActionReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="keepass2android.ACTION_OPEN_ENTRY" />
+                <action android:name="keepass2android.ACTION_ENTRY_ACTION_SELECTED" />
+            </intent-filter>
+        </receiver>
+
+        <service
+            android:name="com.terminal_heat_sink.bluetoothtokeyboardinput.plugin.BleService"
+            android:foregroundServiceType="connectedDevice"
+            android:exported="false" />
+
+        <activity
+            android:name="com.terminal_heat_sink.bluetoothtokeyboardinput.plugin.SetupActivity"
+            android:exported="true"
+            android:label="BtoKB Plugin"
+            android:theme="@style/Theme.BtoKBPlugin">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="keepass2android.ACTION_EDIT_PLUGIN_SETTINGS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+
+    </application>
+</manifest>

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Base app theme — needed so Android can resolve the application's theme. -->
+    <style name="Theme.BtoKBPlugin" parent="Theme.Material3.DayNight.NoActionBar" />
+
+    <!--
+        The plugin activity itself is fully transparent — all UI is presented
+        via AlertDialog overlays so the user never sees a blank activity screen.
+    -->
+    <style name="Theme.BtoKBPlugin.Transparent" parent="Theme.Material3.DayNight.Dialog">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">true</item>
+    </style>
+</resources>

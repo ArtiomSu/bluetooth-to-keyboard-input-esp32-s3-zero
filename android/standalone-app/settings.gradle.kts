@@ -24,3 +24,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "Bluetooth to Keyboard Input"
 include(":app")
+include(":core")
+include(":plugin")

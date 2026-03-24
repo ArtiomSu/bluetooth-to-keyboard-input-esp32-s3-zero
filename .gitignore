@@ -1,3 +1,6 @@
 desktop/.venv
 .DS_Store
 desktop/__pycache__
+
+logos/
+android/example
