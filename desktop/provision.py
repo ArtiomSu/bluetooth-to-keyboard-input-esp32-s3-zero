@@ -105,7 +105,15 @@ async def provision(
 
     _send_ble_module._reset_counter()
 
-    async with BleakClient(device) as client:
+    client = BleakClient(device)
+    await client.connect()
+    try:
+        _backend = getattr(client, "_backend", None)
+        if _backend is not None and hasattr(_backend, "_acquire_mtu"):
+            try:
+                await _backend._acquire_mtu()
+            except Exception:
+                pass
         print(f"[BLE] Connected  (MTU: {client.mtu_size} bytes)")
 
         # Subscribe to ready notifications (required by get_esp32_pubkey flow).
@@ -147,6 +155,13 @@ async def provision(
             # The ESP32 calls esp_restart() before sending the GATT write response.
             pass
         print("[Provision] Write accepted — ESP32 is restarting…")
+    finally:
+        # ESP32 reboots immediately on a valid provisioning write, so the
+        # connection is already gone — suppress the resulting EOFError on BlueZ.
+        try:
+            await client.disconnect()
+        except EOFError:
+            pass
 
     # The ESP32 restarts on receipt of a valid provisioning write; the BLE
     # connection drops immediately, which is expected.
@@ -240,7 +255,15 @@ def main() -> None:
         async def _factory_reset(ble_name: str, psk: bytes) -> None:
             _send_ble_module.PSK = psk
             device = await find_device(ble_name)
-            async with BleakClient(device) as client:
+            client = BleakClient(device)
+            await client.connect()
+            try:
+                _backend = getattr(client, "_backend", None)
+                if _backend is not None and hasattr(_backend, "_acquire_mtu"):
+                    try:
+                        await _backend._acquire_mtu()
+                    except Exception:
+                        pass
                 _send_ble_module._reset_counter()
                 _send_ble_module._last_completion = 0
                 _send_ble_module._notify_event = asyncio.Event()
@@ -255,6 +278,11 @@ def main() -> None:
                 except BleakError:
                     pass  # firmware rebooted before sending ACK — expected
                 print("[Provision] Factory reset accepted — device is rebooting to defaults.")
+            finally:
+                try:
+                    await client.disconnect()
+                except EOFError:
+                    pass
 
         try:
             asyncio.run(_factory_reset(current_ble_name, current_psk))

@@ -446,7 +446,19 @@ async def main(one_shot_text: str | None = None, layout: str = "en-US", target_o
     device = await find_device(device_name)
     _reset_counter()  # fresh counter for every new connection
 
-    async with BleakClient(device) as client:
+    client = BleakClient(device)
+    await client.connect()
+    try:
+        # On Linux/BlueZ, bleak always reports MTU=23 unless we explicitly ask
+        # BlueZ for the negotiated value.  _acquire_mtu() is on the backend
+        # object (BleakClientBlueZDBus), not on the BleakClient wrapper.
+        # macOS negotiates MTU transparently so the wrapper's mtu_size is correct.
+        _backend = getattr(client, "_backend", None)
+        if _backend is not None and hasattr(_backend, "_acquire_mtu"):
+            try:
+                await _backend._acquire_mtu()
+            except Exception as e:
+                print(f"[BLE] MTU negotiation failed ({e}); continuing with default MTU")
         print(f"[BLE] Connected  (MTU: {client.mtu_size} bytes)")
 
         # Subscribe to ready notifications before doing anything else.
@@ -490,6 +502,13 @@ async def main(one_shot_text: str | None = None, layout: str = "en-US", target_o
             await send_string(client, text, esp32_pubkey)
         else:
             await interactive_mode(client, esp32_pubkey, enter=enter)
+    finally:
+        # BlueZ/dbus-fast may raise EOFError if the peripheral already dropped
+        # the connection before our disconnect call completes — that's harmless.
+        try:
+            await client.disconnect()
+        except EOFError:
+            pass
 
     print("[BLE] Disconnected.")
 
