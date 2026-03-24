@@ -53,7 +53,7 @@
 #define DEFAULT_USB_SERIAL         ""          // empty = no serial number shown
 #define DEFAULT_USB_VID            0x303A      // Espressif VID (default)
 #define DEFAULT_USB_PID            0x1001      // Generic HID
-#define FIRMWARE_VERSION           0x0100      // v1.0 — hardcoded, not configurable
+#define FIRMWARE_VERSION           0x0101      // hardcoded, not configurable
 #define SERVICE_UUID            "12340000-1234-1234-1234-123456789abc"
 #define CHARACTERISTIC_UUID     "12340001-1234-1234-1234-123456789abc"
 #define LAYOUT_CHAR_UUID        "12340002-1234-1234-1234-123456789abc"  // write "en-US" or "en-GB"
@@ -334,12 +334,12 @@ static KeyEntry lookupKey(uint32_t cp, KeyLayout layout, KeyOS os) {
 
     // ── Layout-specific symbols ───────────────────────────────────────────
     if (layout == LAYOUT_GB) {
-        // macOS "British" layout: Option+3 = #, Shift+3 = £, Shift+2 = @
-        // Other OSes (Windows/Linux/Android) use Shift+3 = # via K_NUHS.
+        // macOS British: Shift+2=@, Shift+'=", Option+3=#, Option+2=€
+        // Other OSes (Linux/Win): Shift+2=", Shift+'=@, HID 0x32=#, AltGr+4=€
         switch (cp) {
             case ' ':  return {K_SPACE,  false, false};
             case '!':  return {K_1,      true,  false};
-            case '"':  return {K_QUOTE,  true,  false};
+            case '"':  return {K_2,      true,  false};  // Shift+2 = " on UK
             case '#':  return (os == OS_MACOS)
                            ? KeyEntry{K_3,     false, true }   // macOS: Option+3
                            : KeyEntry{K_NUHS,  false, false};  // other: HID 0x32
@@ -361,21 +361,23 @@ static KeyEntry lookupKey(uint32_t cp, KeyLayout layout, KeyOS os) {
             case '=':  return {K_EQUAL,  false, false};
             case '>':  return {K_DOT,    true,  false};
             case '?':  return {K_SLASH,  true,  false};
-            case '@':  return {K_2,      true,  false};
+            case '@':  return {K_QUOTE,  true,  false};  // Shift+'  = @ on UK
             case '[':  return {K_LBRACK, false, false};
-            case '\\'  : return {K_BSLASH, false, false};
+            case '\\'  : return {K_NUBS,   false, false};  // ISO Non-US \\ key (0x64)
             case ']':  return {K_RBRACK, false, false};
             case '^':  return {K_6,      true,  false};
             case '_':  return {K_MINUS,  true,  false};
             case '`':  return {K_GRAVE,  false, false};
             case '{':  return {K_LBRACK, true,  false};
-            case '|':  return {K_BSLASH, true,  false};
+            case '|':  return {K_NUBS,   true,  false};  // Shift+ISO Non-US \ key (0x64) = | on UK
             case '}':  return {K_RBRACK, true,  false};
             case '~':  return (os == OS_MACOS)
                            ? KeyEntry{K_GRAVE, true,  false}  // macOS British: Shift+` = ~
                            : KeyEntry{K_NUHS,  true,  false}; // other: Shift+ISO key 0x32 = ~
             case 0x00A3: return {K_3,    true,  false};  // £ = Shift+3
-            case 0x20AC: return {K_2,    false, true };  // € = Alt/Option+2
+            case 0x20AC: return (os == OS_MACOS)
+                           ? KeyEntry{K_2,  false, true}   // macOS British: Option+2 = €
+                           : KeyEntry{K_4,  false, true};  // UK Linux/Win: AltGr+4 = €
             case '\n': return {0x28, false, false};
             case '\t': return {0x2B, false, false};
             default:   return {0, false, false};
@@ -428,10 +430,10 @@ static KeyEntry lookupKey(uint32_t cp, KeyLayout layout, KeyOS os) {
  * Uses pressRaw() which directly injects the HID usage code into the
  * report, bypassing any ASCII/keycode lookup tables in the library.
  */
-static void pressRawKey(uint8_t hidKey, bool shift, bool alt) {
+static void pressRawKey(uint8_t hidKey, bool shift, bool alt, KeyOS os = OS_OTHER) {
     applyModifiers();          // re-press any script-held modifiers first
     if (shift) Keyboard.press(KEY_LEFT_SHIFT);
-    if (alt)   Keyboard.press(KEY_LEFT_ALT);
+    if (alt)   Keyboard.press(os == OS_MACOS ? KEY_LEFT_ALT : KEY_RIGHT_ALT);  // Option on macOS, AltGr on others
     Keyboard.pressRaw(hidKey);
     delay(keystrokeHoldDelay());  // hold duration
     Keyboard.releaseAll();
@@ -467,7 +469,7 @@ static void typeString(const char *str) {
 
         KeyEntry k = lookupKey(cp, layout, os);
         if (k.hidKey != 0) {
-            pressRawKey(k.hidKey, k.shift, k.alt);
+            pressRawKey(k.hidKey, k.shift, k.alt, os);
         }
         // unmapped codepoints are silently skipped
     }
