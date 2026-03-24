@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -73,7 +74,8 @@ fun ScriptScreen(viewModel: BleViewModel) {
     // Reload from disk each time; not saveable since it's just a cache of the filesystem
     var scriptList by remember { mutableStateOf(repo.getAll()) }
 
-    val isBusy        by viewModel.isBusy.collectAsState()
+    val isBusy           by viewModel.isBusy.collectAsState()
+    val isScriptRunning  by viewModel.isScriptRunning.collectAsState()
     val statusMessage by viewModel.statusMessage.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -146,6 +148,7 @@ fun ScriptScreen(viewModel: BleViewModel) {
             content = editContent,
             onContentChange = { editContent = it },
             isBusy = isBusy,
+            isScriptRunning = isScriptRunning,
             snackbarHostState = snackbarHostState,
             onBack = {
                 scriptList = repo.getAll()
@@ -153,16 +156,19 @@ fun ScriptScreen(viewModel: BleViewModel) {
             },
             onSave = { saveScript() },
             onRun = { viewModel.runScript(editContent) },
+            onStop = { viewModel.stopScript() },
             onExport = { shareScript(editName.ifBlank { "script" }, editContent) },
         )
     } else {
         ScriptListScreen(
             scripts = scriptList,
             isBusy = isBusy,
+            isScriptRunning = isScriptRunning,
             snackbarHostState = snackbarHostState,
             onNewScript    = { openEditor("", "", "") },
             onEditScript   = { name -> openEditor(name, name, repo.load(name)) },
             onRunScript    = { name -> viewModel.runScript(repo.load(name)) },
+            onStopScript   = { viewModel.stopScript() },
             onDeleteScript = { name ->
                 repo.delete(name)
                 scriptList = repo.getAll()
@@ -180,10 +186,12 @@ fun ScriptScreen(viewModel: BleViewModel) {
 private fun ScriptListScreen(
     scripts: List<String>,
     isBusy: Boolean,
+    isScriptRunning: Boolean,
     snackbarHostState: SnackbarHostState,
     onNewScript: () -> Unit,
     onEditScript: (String) -> Unit,
     onRunScript: (String) -> Unit,
+    onStopScript: () -> Unit,
     onDeleteScript: (String) -> Unit,
     onExportScript: (String) -> Unit,
     onImport: () -> Unit,
@@ -225,8 +233,10 @@ private fun ScriptListScreen(
                     ScriptListItem(
                         name = name,
                         isBusy = isBusy,
+                        isScriptRunning = isScriptRunning,
                         onEdit   = { onEditScript(name) },
                         onRun    = { onRunScript(name) },
+                        onStop   = onStopScript,
                         onExport = { onExportScript(name) },
                         onDelete = { onDeleteScript(name) },
                     )
@@ -241,8 +251,10 @@ private fun ScriptListScreen(
 private fun ScriptListItem(
     name: String,
     isBusy: Boolean,
+    isScriptRunning: Boolean,
     onEdit: () -> Unit,
     onRun: () -> Unit,
+    onStop: () -> Unit,
     onExport: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -251,8 +263,18 @@ private fun ScriptListItem(
         headlineContent = { Text(name) },
         trailingContent = {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onRun, enabled = !isBusy) {
-                    Icon(Icons.Default.PlayArrow, contentDescription = "Run $name")
+                if (isScriptRunning) {
+                    IconButton(onClick = onStop) {
+                        Icon(
+                            Icons.Default.Stop,
+                            contentDescription = "Stop script",
+                            tint = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                } else {
+                    IconButton(onClick = onRun, enabled = !isBusy) {
+                        Icon(Icons.Default.PlayArrow, contentDescription = "Run $name")
+                    }
                 }
                 Box {
                     IconButton(onClick = { menuExpanded = true }) {
@@ -301,10 +323,12 @@ private fun ScriptEditScreen(
     content: String,
     onContentChange: (String) -> Unit,
     isBusy: Boolean,
+    isScriptRunning: Boolean,
     snackbarHostState: SnackbarHostState,
     onBack: () -> Unit,
     onSave: () -> Unit,
     onRun: () -> Unit,
+    onStop: () -> Unit,
     onExport: () -> Unit,
 ) {
     Scaffold(
@@ -361,13 +385,26 @@ private fun ScriptEditScreen(
                 maxLines = Int.MAX_VALUE,
             )
             Spacer(Modifier.height(12.dp))
-            Button(
-                onClick = onRun,
-                enabled = content.isNotBlank() && !isBusy,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Icon(Icons.Default.PlayArrow, null, modifier = Modifier.padding(end = 8.dp))
-                Text(if (isBusy) "Running…" else "Run Script")
+            if (isScriptRunning) {
+                Button(
+                    onClick = onStop,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                    ),
+                ) {
+                    Icon(Icons.Default.Stop, null, modifier = Modifier.padding(end = 8.dp))
+                    Text("Stop Script")
+                }
+            } else {
+                Button(
+                    onClick = onRun,
+                    enabled = content.isNotBlank() && !isBusy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.Default.PlayArrow, null, modifier = Modifier.padding(end = 8.dp))
+                    Text(if (isBusy) "Running…" else "Run Script")
+                }
             }
             Spacer(Modifier.height(16.dp))
         }

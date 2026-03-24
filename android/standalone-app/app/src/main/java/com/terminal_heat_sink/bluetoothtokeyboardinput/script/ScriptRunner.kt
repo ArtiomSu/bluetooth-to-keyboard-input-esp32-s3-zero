@@ -33,11 +33,14 @@ suspend fun runScript(
     ble: BleManager,
     crypto: CryptoManager,
     initialContext: ScriptContext = ScriptContext(),
+    stopRequested: () -> Boolean = { false },
 ) {
     val ctx = initialContext.copy()
     val lines = scriptText.lines()
 
     for ((index, rawLine) in lines.withIndex()) {
+        // Check before starting each command so the current one always completes fully.
+        if (stopRequested()) return
         val lineno = index + 1
         val line = rawLine.trim()
         if (line.isEmpty()) continue

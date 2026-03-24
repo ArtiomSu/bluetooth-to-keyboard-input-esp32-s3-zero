@@ -47,6 +47,17 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
     private val _isBusy = MutableStateFlow(false)
     val isBusy: StateFlow<Boolean> = _isBusy.asStateFlow()
 
+    // Tracks whether a script is currently running (subset of isBusy).
+    private val _isScriptRunning = MutableStateFlow(false)
+    val isScriptRunning: StateFlow<Boolean> = _isScriptRunning.asStateFlow()
+
+    // Cooperative stop flag — checked between commands so the current one always finishes.
+    @Volatile private var scriptStopRequested = false
+
+    fun stopScript() {
+        scriptStopRequested = true
+    }
+
     // Mouse enabled — read from firmware on every connect; false until confirmed.
     private val _mouseEnabled = MutableStateFlow(false)
     val mouseEnabled: StateFlow<Boolean> = _mouseEnabled.asStateFlow()
@@ -230,13 +241,15 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
     fun runScript(scriptText: String) {
         val crypto = cryptoManager ?: return
         val device = activeDevice
+        scriptStopRequested = false
         viewModelScope.launch {
             try {
                 _isBusy.value = true
+                _isScriptRunning.value = true
                 val ctx = if (device != null) {
                     ScriptContext(device.minHoldMs, device.maxHoldMs, device.minGapMs, device.maxGapMs)
                 } else ScriptContext()
-                runScript(scriptText, bleManager, crypto, ctx)
+                runScript(scriptText, bleManager, crypto, ctx, stopRequested = { scriptStopRequested })
                 // Restore saved settings — script commands like SET_MIN_DELAY may have
                 // changed them on the ESP32 for the duration of the script.
                 if (device != null) {
@@ -244,11 +257,12 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
                     bleManager.setOs(device.targetOs, crypto)
                     bleManager.setDelay(device.minHoldMs, device.maxHoldMs, device.minGapMs, device.maxGapMs, crypto)
                 }
-                _statusMessage.value = "Script completed"
+                _statusMessage.value = if (scriptStopRequested) "Script stopped" else "Script completed"
             } catch (e: Exception) {
                 _statusMessage.value = "Script error: ${e.message}"
             } finally {
                 _isBusy.value = false
+                _isScriptRunning.value = false
             }
         }
     }
