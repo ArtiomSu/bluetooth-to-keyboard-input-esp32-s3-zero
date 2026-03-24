@@ -48,3 +48,22 @@ KeePass2Android supports a plugin API that allows third-party apps to extend its
 - Shares the BLE + encryption logic with the standalone app — extract this into a shared library module (`core/`) so both apps use the same implementation
 - Plugin settings (device alias, field order, submit on enter) configurable from within KeePass2Android or the standalone app
 - Must handle the case where no device is connected — prompt the user to connect via the standalone app or provide a mini connection UI inline
+  
+### Known blockers (shelved see keepass branch)
+
+The plugin was partially implemented (broadcast-receiver architecture, access-token negotiation, `openEntry` callback all confirmed working in logcat) but could not be made fully functional due to two hard constraints imposed by KeePass2Android:
+
+1. **Hardcoded package-name whitelist.** K2A uses `PackageManager.queryIntentActivities` / `queriesPackages` to discover plugins. The list is compiled into K2A's APK and cannot be changed without forking K2A:
+   ```
+   keepass2android.plugin.keyboardswap2
+   keepass2android.AncientIconSet
+   keepass2android.plugin.qr          ← our plugin must impersonate this slot
+   it.andreacioni.kp2a.plugin.keelink
+   com.inputstick.apps.kp2aplugin
+   com.dropbox.android
+   ```
+   Working around this requires setting `applicationId = "keepass2android.plugin.qr"` while keeping the Kotlin `namespace` as our own package. This is a naming collision hack — it would prevent distribution through any app store and breaks if the legitimate QR plugin is installed.
+
+2. **Entry-action buttons never appear.** Even after the access token is negotiated and `openEntry` fires correctly, K2A does not display the action buttons added via `addEntryAction`. K2A calls `context.createPackageContext(pluginPackage, 0).resources` and resolves the icon resource ID against the plugin's own APK. Using drawable resources from within the plugin APK (`R.drawable.*`) is the correct approach, but the buttons still do not appear in the entry overflow menu — the exact cause was not isolated before the effort was abandoned.
+
+**Conclusion:** The K2A plugin API is underdocumented and the app has hardcoded partner-package restrictions that make third-party plugin development impractical without forking K2A.
