@@ -35,12 +35,24 @@ class MainActivity : ComponentActivity() {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
 
-        val shareText = intent.takeIf { it?.action == Intent.ACTION_SEND }
+        // Store any share intent text in the ViewModel so it survives navigation
+        // and is also accessible on re-delivery via onNewIntent (singleTask mode).
+        intent.takeIf { it?.action == Intent.ACTION_SEND }
             ?.getStringExtra(Intent.EXTRA_TEXT)
+            ?.let { viewModel.setPendingShareText(it) }
+
         setContent {
             BluetoothToKeyboardInputTheme {
-                AppNavigation(viewModel = viewModel, shareIntent = shareText)
+                AppNavigation(viewModel = viewModel)
             }
         }
+    }
+
+    // Called when a new share intent arrives while the app is already running (singleTask).
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        intent.takeIf { it.action == Intent.ACTION_SEND }
+            ?.getStringExtra(Intent.EXTRA_TEXT)
+            ?.let { viewModel.setPendingShareText(it) }
     }
 }

@@ -49,19 +49,13 @@ sealed class Screen(val route: String, val label: String) {
 @Composable
 fun AppNavigation(
     viewModel: BleViewModel,
-    shareIntent: String? = null,
 ) {
     val navController = rememberNavController()
     val navBackStack by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStack?.destination?.route
     val connectionState by viewModel.connectionState.collectAsState()
     val mouseEnabled    by viewModel.mouseEnabled.collectAsState()
-
-    // Trackpad tab is shown only when the firmware has mouse support enabled.
-    val bottomNavItems = if (mouseEnabled)
-        listOf(Screen.Send, Screen.Script, Screen.Trackpad, Screen.Keyboard, Screen.Settings)
-    else
-        listOf(Screen.Send, Screen.Script, Screen.Keyboard, Screen.Settings)
+    val pendingShareText by viewModel.pendingShareText.collectAsState()
 
     // Return to Devices automatically if the ESP32 drops the connection unexpectedly
     // (e.g. powered off) while the user is on any connected screen.
@@ -69,6 +63,25 @@ fun AppNavigation(
         Screen.Send.route, Screen.Script.route, Screen.Keyboard.route, Screen.Trackpad.route,
         Screen.Settings.route, Screen.Provision.route
     )
+
+    // When a share intent arrives while the app is already connected, navigate to the
+    // Send screen so the text is delivered immediately.
+    LaunchedEffect(pendingShareText) {
+        if (pendingShareText != null && currentRoute in connectedRoutes && currentRoute != Screen.Send.route) {
+            navController.navigate(Screen.Send.route) {
+                popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                launchSingleTop = true
+                restoreState = true
+            }
+        }
+    }
+
+    // Trackpad tab is shown only when the firmware has mouse support enabled.
+    val bottomNavItems = if (mouseEnabled)
+        listOf(Screen.Send, Screen.Script, Screen.Trackpad, Screen.Keyboard, Screen.Settings)
+    else
+        listOf(Screen.Send, Screen.Script, Screen.Keyboard, Screen.Settings)
+
     LaunchedEffect(connectionState) {
         if (connectionState is ConnectionState.Disconnected && currentRoute in connectedRoutes) {
             navController.navigate(Screen.Devices.route) {
@@ -140,7 +153,6 @@ fun AppNavigation(
             composable(Screen.Send.route) {
                 SendScreen(
                     viewModel = viewModel,
-                    shareIntentText = shareIntent,
                     onDisconnect = {
                         viewModel.disconnect()
                         navController.navigate(Screen.Devices.route) {

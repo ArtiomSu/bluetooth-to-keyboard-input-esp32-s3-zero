@@ -44,6 +44,13 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
     private val _statusMessage = MutableStateFlow<String?>(null)
     val statusMessage: StateFlow<String?> = _statusMessage.asStateFlow()
 
+    // Text received via a share intent (ACTION_SEND). Set by MainActivity on both cold
+    // start and onNewIntent (singleTask re-delivery). Cleared by SendScreen after consuming.
+    private val _pendingShareText = MutableStateFlow<String?>(null)
+    val pendingShareText: StateFlow<String?> = _pendingShareText.asStateFlow()
+    fun setPendingShareText(text: String?) { _pendingShareText.value = text }
+    fun clearPendingShareText() { _pendingShareText.value = null }
+
     private val _isBusy = MutableStateFlow(false)
     val isBusy: StateFlow<Boolean> = _isBusy.asStateFlow()
 

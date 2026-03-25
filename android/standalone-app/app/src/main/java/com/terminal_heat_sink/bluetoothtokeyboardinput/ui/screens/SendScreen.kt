@@ -42,10 +42,10 @@ import com.terminal_heat_sink.bluetoothtokeyboardinput.ui.viewmodel.BleViewModel
 @Composable
 fun SendScreen(
     viewModel: BleViewModel,
-    shareIntentText: String? = null,
     onDisconnect: () -> Unit,
 ) {
-    var text by rememberSaveable { mutableStateOf(shareIntentText ?: "") }
+    val pendingShareText by viewModel.pendingShareText.collectAsState()
+    var text by rememberSaveable { mutableStateOf(pendingShareText ?: "") }
     val isBusy          by viewModel.isBusy.collectAsState()
     val statusMessage   by viewModel.statusMessage.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -70,10 +70,12 @@ fun SendScreen(
         else                   -> clipText.take(3) + "…"
     }
 
-    // Auto-send if launched from a share intent
-    LaunchedEffect(shareIntentText) {
-        if (!shareIntentText.isNullOrBlank()) {
-            viewModel.sendText(shareIntentText)
+    // Auto-send when share text arrives (both cold start and singleTask re-delivery)
+    LaunchedEffect(pendingShareText) {
+        if (!pendingShareText.isNullOrBlank()) {
+            text = pendingShareText!!  // update text field so the user sees what was shared
+            viewModel.sendText(pendingShareText!!)
+            viewModel.clearPendingShareText()
         }
     }
 
