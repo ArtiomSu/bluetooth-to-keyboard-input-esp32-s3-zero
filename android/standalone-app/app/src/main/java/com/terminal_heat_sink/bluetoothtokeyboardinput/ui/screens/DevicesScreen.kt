@@ -60,7 +60,7 @@ fun DevicesScreen(
     var cloneSource by remember { mutableStateOf<DeviceConfig?>(null) }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("Bluetooth Input") }) },
+        topBar = { TopAppBar(title = { Text("Saved Devices") }) },
         floatingActionButton = {
             FloatingActionButton(onClick = {
                 viewModel.selectDeviceConfig(null)
