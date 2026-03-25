@@ -271,10 +271,16 @@ Two flags control how symbols are typed. Set them to match the **target machine*
 | `--min-delay-hold` | integer ms | `20` | Minimum key hold duration |
 | `--max-delay-hold` | integer ms | `20` | Maximum key hold duration |
 > **`--os macos`** is needed when the target is a Mac running the British layout,
-> because macOS uses **Option+3** for `#` whereas Windows/Linux/Android use a
+> because macOS uses **Option+3** for `#` whereas Windows/Linux use a
 > dedicated ISO key (HID 0x32).
 >
-> `other` covers Windows, Linux, and Android — they all behave identically.
+> `other` covers Windows, Linux, and Android. When targeting Android, always
+> use `--layout en-US` and set the physical keyboard layout to **English (US)**
+> in Android itself (**Settings → General Management → Keyboard list and default
+> → Physical keyboard → select your keyboard → English (US)**). Android decodes
+> HID scan codes with its internal US keymap regardless of the keyboard language
+> setting, so `en-GB` mappings do not work and `£`/`€` cannot be typed via HID
+> at all.
 
 ### One-shot (send a single string and exit)
 
@@ -290,6 +296,9 @@ python send_ble.py --device office-desk --layout en-GB --os macos --enter 'Hello
 
 # UK layout on Windows / Linux
 python send_ble.py --device office-desk --layout en-GB --os other 'Hello, World *###£$@'
+
+# Android — use en-US layout (Android always decodes HID as US)
+python send_ble.py --device office-desk --layout en-US --os other --enter 'Hello, Android!'
 
 # Random per-keystroke delay between 50 and 150 ms (mimics human typing speed)
 python send_ble.py --min-delay 50 --max-delay 150 "Hello, World!"
@@ -341,6 +350,7 @@ You will see a menu:
 2) Manual tests (1344 and 5000 chars)
 3) Full UK keyboard test (make sure you have the UK layout set in your OS)
 4) Full US keyboard test (make sure you have the US layout set in your OS)
+5) Script tests
 ```
 
 **Automatic tests (options 1, 3, 4)** send text via BLE and confirm the

@@ -17,6 +17,11 @@ This contains two projects:
 - **Device management** — saved device list with alias, BLE name, and PSK (equivalent to `~/.bluetooth-input/devices.json`)
 - **Provisioning flow** — first-time setup and re-provisioning (set BLE name + PSK)
 - **Settings** — keyboard layout (en-US / en-GB), target OS (other / macOS), hold/gap delay tuning
+  > **Note:** When targeting Android, always set layout to **en-US** and OS to **other**. Also set the
+  > physical keyboard layout to **English (US)** in Android itself: **Settings → General Management →
+  > Keyboard list and default → Physical keyboard → select your keyboard → English (US)**. Android decodes
+  > HID scan codes using its internal US keymap regardless of the keyboard language setting, so `en-GB`
+  > mappings do not work and `£`/`€` cannot be typed via HID at all.
 
 ### Technical notes
 

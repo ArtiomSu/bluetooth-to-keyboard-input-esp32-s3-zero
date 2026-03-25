@@ -339,7 +339,9 @@ static KeyEntry lookupKey(uint32_t cp, KeyLayout layout, KeyOS os) {
         switch (cp) {
             case ' ':  return {K_SPACE,  false, false};
             case '!':  return {K_1,      true,  false};
-            case '"':  return {K_2,      true,  false};  // Shift+2 = " on UK
+            case '"':  return (os == OS_MACOS)
+                           ? KeyEntry{K_QUOTE, true,  false}  // macOS UK: Shift+' = " (same as US base)
+                           : KeyEntry{K_2,     true,  false}; // other UK: Shift+2 = "
             case '#':  return (os == OS_MACOS)
                            ? KeyEntry{K_3,     false, true }   // macOS: Option+3
                            : KeyEntry{K_NUHS,  false, false};  // other: HID 0x32
@@ -361,15 +363,21 @@ static KeyEntry lookupKey(uint32_t cp, KeyLayout layout, KeyOS os) {
             case '=':  return {K_EQUAL,  false, false};
             case '>':  return {K_DOT,    true,  false};
             case '?':  return {K_SLASH,  true,  false};
-            case '@':  return {K_QUOTE,  true,  false};  // Shift+'  = @ on UK
+            case '@':  return (os == OS_MACOS)
+                           ? KeyEntry{K_2,     true,  false}   // macOS UK: Shift+2 = @ (same as US base)
+                           : KeyEntry{K_QUOTE, true,  false};  // other UK: Shift+' = @
             case '[':  return {K_LBRACK, false, false};
-            case '\\'  : return {K_NUBS,   false, false};  // ISO Non-US \\ key (0x64)
+            case '\\'  : return (os == OS_MACOS)
+                           ? KeyEntry{K_BSLASH, false, false}  // macOS UK: use US-style base key
+                           : KeyEntry{K_NUBS,   false, false}; // other UK: ISO Non-US \\ key (0x64)
             case ']':  return {K_RBRACK, false, false};
             case '^':  return {K_6,      true,  false};
             case '_':  return {K_MINUS,  true,  false};
             case '`':  return {K_GRAVE,  false, false};
             case '{':  return {K_LBRACK, true,  false};
-            case '|':  return {K_NUBS,   true,  false};  // Shift+ISO Non-US \ key (0x64) = | on UK
+            case '|':  return (os == OS_MACOS)
+                           ? KeyEntry{K_BSLASH, true,  false}  // macOS UK: Shift+\ = | (same as US base)
+                           : KeyEntry{K_NUBS,   true,  false}; // other UK: Shift+ISO Non-US \ key (0x64) = |
             case '}':  return {K_RBRACK, true,  false};
             case '~':  return (os == OS_MACOS)
                            ? KeyEntry{K_GRAVE, true,  false}  // macOS British: Shift+` = ~
