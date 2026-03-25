@@ -46,6 +46,34 @@ class DeviceRepository(context: Context) {
         prefs.edit().putString(KEY_DEVICES, gson.toJson(devices)).apply()
     }
 
+    /**
+     * Serialise all saved devices to a JSON string suitable for writing to a file.
+     * PSKs are included in plain hex — the exported file should be treated as sensitive.
+     */
+    fun exportJson(): String = gson.toJson(getAll())
+
+    /**
+     * Replace all saved devices with the list parsed from [json].
+     * Entries with blank aliases are skipped.  Returns the number of devices imported.
+     */
+    fun importJson(json: String): Int {
+        val imported: List<DeviceConfig> = try {
+            gson.fromJson(json, listType) ?: emptyList()
+        } catch (_: Exception) {
+            return -1  // parse failure
+        }
+        val valid = imported.filter { it.alias.isNotBlank() }
+        // Merge: imported entries overwrite existing ones with the same alias;
+        // existing entries not present in the import are kept.
+        val merged = getAll().toMutableList()
+        valid.forEach { incoming ->
+            val idx = merged.indexOfFirst { it.alias == incoming.alias }
+            if (idx >= 0) merged[idx] = incoming else merged.add(incoming)
+        }
+        prefs.edit().putString(KEY_DEVICES, gson.toJson(merged)).apply()
+        return valid.size
+    }
+
     fun getDefaultDevice(): DeviceConfig = DeviceConfig(
         alias = "default",
         bleName = BleConstants.DEFAULT_DEVICE_NAME,

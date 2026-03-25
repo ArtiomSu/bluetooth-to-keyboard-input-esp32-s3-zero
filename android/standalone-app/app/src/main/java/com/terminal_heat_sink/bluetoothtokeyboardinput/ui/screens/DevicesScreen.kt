@@ -1,5 +1,8 @@
 package com.terminal_heat_sink.bluetoothtokeyboardinput.ui.screens
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -15,6 +18,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -31,20 +36,27 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants
 import com.terminal_heat_sink.bluetoothtokeyboardinput.data.DeviceConfig
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ui.viewmodel.BleViewModel
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -53,14 +65,70 @@ fun DevicesScreen(
     onScanClick: () -> Unit,
     onDeviceConnect: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val scope   = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
+
     val devices = remember { viewModel.repository.getAll() }
     var deviceList by remember { mutableStateOf(devices) }
 
     // Clone dialog state
     var cloneSource by remember { mutableStateOf<DeviceConfig?>(null) }
 
+    // ── Export: system Save-file picker ──────────────────────────────────────
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            try {
+                val json = viewModel.repository.exportJson()
+                context.contentResolver.openOutputStream(uri)?.use { it.write(json.toByteArray()) }
+                snackbarHostState.showSnackbar("Devices exported successfully")
+            } catch (e: Exception) {
+                snackbarHostState.showSnackbar("Export failed: ${e.message}")
+            }
+        }
+    }
+
+    // ── Import: system Open-file picker ──────────────────────────────────────
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            try {
+                val json = context.contentResolver.openInputStream(uri)
+                    ?.use { it.readBytes().toString(Charsets.UTF_8) }
+                    ?: throw Exception("Could not read file")
+                val count = viewModel.repository.importJson(json)
+                if (count < 0) {
+                    snackbarHostState.showSnackbar("Import failed: invalid JSON")
+                } else {
+                    deviceList = viewModel.repository.getAll()
+                    snackbarHostState.showSnackbar("Imported $count device(s)")
+                }
+            } catch (e: Exception) {
+                snackbarHostState.showSnackbar("Import failed: ${e.message}")
+            }
+        }
+    }
+
     Scaffold(
-        topBar = { TopAppBar(title = { Text("Saved Devices") }) },
+        topBar = {
+            TopAppBar(
+                title = { Text("Saved Devices") },
+                actions = {
+                    IconButton(onClick = { importLauncher.launch(arrayOf("application/json", "*/*")) }) {
+                        Icon(Icons.Default.FileUpload, contentDescription = "Import devices")
+                    }
+                    IconButton(onClick = { exportLauncher.launch("bluetooth-input-devices.json") }) {
+                        Icon(Icons.Default.FileDownload, contentDescription = "Export devices")
+                    }
+                },
+            )
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         floatingActionButton = {
             FloatingActionButton(onClick = {
                 viewModel.selectDeviceConfig(null)
@@ -91,19 +159,20 @@ fun DevicesScreen(
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                item {
-                    // Default / unprovisioned device row
-                    SavedDeviceRow(
-                        device = viewModel.repository.getDefaultDevice(),
-                        onConnect = {
-                            viewModel.selectDeviceConfig(null) // will use default PSK
-                            onScanClick()
-                        },
-                        onDelete = null,
-                        onClone = null, // default device can't be cloned (no PSK stored)
-                    )
-                    HorizontalDivider()
-                }
+                // this allows easier connecting to an unprovisioned device, but might confuse users why its always there, so lets hide it for now.
+                // item {
+                //     // Default / unprovisioned device row
+                //     SavedDeviceRow(
+                //         device = viewModel.repository.getDefaultDevice(),
+                //         onConnect = {
+                //             viewModel.selectDeviceConfig(null) // will use default PSK
+                //             onScanClick()
+                //         },
+                //         onDelete = null,
+                //         onClone = null, // default device can't be cloned (no PSK stored)
+                //     )
+                //     HorizontalDivider()
+                // }
                 items(deviceList, key = { it.alias }) { config ->
                     SavedDeviceRow(
                         device = config,
