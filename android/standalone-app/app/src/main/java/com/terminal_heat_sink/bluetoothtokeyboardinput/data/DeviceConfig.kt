@@ -12,8 +12,9 @@ data class DeviceConfig(
     val maxGapMs: Int = 20,
     val usbVid: Int = 0x303A,
     val usbPid: Int = 0x1001,
-    val usbManufacturerName: String = "ESP32-S3",
+    val usbManufacturerName: String = "ArtiomSu",
     val usbSerialNumber: String = "",
+    val firmwareVersion: String? = null,
 ) {
     val pskBytes: ByteArray get() = pskHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
 }

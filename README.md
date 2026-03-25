@@ -129,6 +129,21 @@ St  Name             Address                                RSSI  Alias
 
 Use `--timeout SECONDS` to scan longer (default: 10 s).
 
+Add `--read-version` (or `-V`) to also connect to each ESP32-KB device and
+display its firmware version. This adds a short connection per device (~2–3 s
+each) and requires no PSK:
+
+```bash
+python list_devices.py --read-version
+```
+
+```
+St  Name             Address           RSSI  Alias        Version
+──  ───────────────  ────────────────  ─────  ───────────  ───────
+✓   ESP32-KB-office  4CB2…A32C          -53  office       v1.1
+⚠   ESP32-KB         E854…310A          -78               v1.1
+```
+
 ### First-time provisioning
 
 Omit `--device` when the device is still using factory defaults:
@@ -368,7 +383,7 @@ quit vim (`:wq`), the script reads the file back and checks it.
 
 ### BLE GATT characteristics
 
-The ESP32 exposes six characteristics under service `12340000-1234-1234-1234-123456789abc`:
+The ESP32 exposes characteristics under service `12340000-1234-1234-1234-123456789abc`:
 
 | UUID suffix | Direction | Purpose |
 |-------------|-----------|---------|
@@ -381,6 +396,9 @@ The ESP32 exposes six characteristics under service `12340000-1234-1234-1234-123
 | `...0007...` | write | Keystroke delays — `[uint16 minHold][uint16 maxHold][uint16 minGap][uint16 maxGap]` big-endian ms (HMAC-authenticated) |
 | `...0008...` | write | Raw HID event — encrypted with ECIES; payload: `[1-byte type][optional 1-byte data]`. Types: `0x01` KEY_TAP, `0x02` MOD_DOWN, `0x03` MOD_UP, `0x04` MOD_CLEAR |
 | `...0009...` | write | Provisioning — `HMAC(currentPSK, inner)` where `inner = [name_len:1][name][new_psk:32][vid:2 BE][pid:2 BE][mfr_len:1][mfr][serial_len:1][serial]`; `name_len=0` triggers factory reset; ESP32 saves to NVS and restarts |
+| `...000A...` | write | Raw (unencrypted) mouse event — `[1-byte type][payload]` |
+| `...000B...` | read/write | Mouse-enable toggle — `HMAC(PSK, [0x00\|0x01])`; read returns current state; write triggers NVS save and device restart |
+| `...000C...` | read | Firmware version — 2 bytes big-endian (e.g. `0x01 0x01` = v1.1); no authentication required |
 
 ### Connection flow
 

@@ -26,6 +26,7 @@ import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.CHAR_REA
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.CHAR_TEXT_UUID
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.CHAR_MOUSE_UUID
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.CHAR_MOUSE_EN_UUID
+import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.CHAR_FIRMWARE_VER_UUID
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.ECIES_OVERHEAD
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.EVENT_KEY_TAP
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.MOUSE_EVENT_BUTTON_CLICK
@@ -386,6 +387,20 @@ class BleManager(private val context: Context) {
             @Suppress("DEPRECATION")
             gatt?.writeCharacteristic(char)
         }
+    }
+
+    /** Read the 2-byte firmware version from the firmware (CHAR_FIRMWARE_VER_UUID).
+     *  Returns a human-readable string like "v1.1", or "unknown" if not present.
+     */
+    suspend fun readFirmwareVersion(): String = try {
+        val value = readCharacteristic(CHAR_FIRMWARE_VER_UUID)
+        if (value.size >= 2) {
+            "v${value[0].toInt() and 0xFF}.${value[1].toInt() and 0xFF}"
+        } else {
+            "unknown"
+        }
+    } catch (_: Exception) {
+        "unknown"  // Characteristic not found (old firmware)
     }
 
     /** Read the mouse-enabled flag from the firmware (CHAR_MOUSE_EN_UUID). */

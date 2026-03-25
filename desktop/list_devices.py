@@ -22,10 +22,11 @@ _here = Path(__file__).parent
 if str(_here) not in sys.path:
     sys.path.insert(0, str(_here))
 
-from bleak import BleakScanner
+from bleak import BleakClient, BleakScanner
 from send_ble import SERVICE_UUID, load_config, _DEFAULT_PSK_HEX, _DEFAULT_DEVICE_NAME
 
 SCAN_TIMEOUT_DEFAULT = 10.0
+FIRMWARE_VER_CHAR_UUID = "1234000C-1234-1234-1234-123456789abc"
 
 # ── ANSI colour helpers ───────────────────────────────────────────────────────
 def _vt_supported() -> bool:
@@ -72,7 +73,19 @@ _STATUS_COLOR = {
 }
 
 
-async def scan(timeout: float) -> None:
+async def read_firmware_version(address: str) -> str:
+    """Connect briefly to a device, read its firmware version, then disconnect."""
+    try:
+        async with BleakClient(address, timeout=6.0) as client:
+            data = await client.read_gatt_char(FIRMWARE_VER_CHAR_UUID)
+            if len(data) >= 2:
+                return f"v{data[0]}.{data[1]}"
+    except Exception:
+        pass
+    return "?"
+
+
+async def scan(timeout: float, read_version: bool) -> None:
     print(f"Scanning for {timeout:.0f}s…\n")
 
     cfg = load_config()
@@ -119,21 +132,36 @@ async def scan(timeout: float) -> None:
 
         rows.append((status, name, addr, rssi, alias or ""))
 
+    # Optionally connect to each ESP32-KB device and read firmware version
+    versions: dict[str, str] = {}  # address → version string
+    if read_version:
+        our_addrs = [addr for status, _, addr, _, _ in rows if status in ("✓", "⚠", "●")]
+        if our_addrs:
+            print(f"Reading firmware version from {len(our_addrs)} device(s)…")
+            for addr in our_addrs:
+                versions[addr] = await read_firmware_version(addr)
+            print()
+
     # Column widths
     w_name  = max(len(r[1]) for r in rows)
     w_name  = max(w_name, 4)
     w_addr  = max(len(r[2]) for r in rows)
     w_alias = max((len(r[4]) for r in rows), default=0)
     w_alias = max(w_alias, 5)
+    w_ver = max((len(v) for v in versions.values()), default=0)
+    w_ver = max(w_ver, 7) if versions else 0  # 7 = len("Version")
 
-    sep = f"{'─'*2}  {'─'*w_name}  {'─'*w_addr}  {'─'*5}  {'─'*w_alias}"
-    hdr = bold(f"{'St'}  {'Name':<{w_name}}  {'Address':<{w_addr}}  {'RSSI':>5}  {'Alias':<{w_alias}}")
+    ver_hdr = f"  {'Version':<{w_ver}}" if w_ver else ""
+    sep_ver = f"  {'─'*w_ver}" if w_ver else ""
+    sep = f"{'─'*2}  {'─'*w_name}  {'─'*w_addr}  {'─'*5}  {'─'*w_alias}{sep_ver}"
+    hdr = bold(f"{'St'}  {'Name':<{w_name}}  {'Address':<{w_addr}}  {'RSSI':>5}  {'Alias':<{w_alias}}{ver_hdr}")
     print(hdr)
     print(dim(sep))
     for status, name, addr, rssi, alias in rows:
         color = _STATUS_COLOR.get(status, lambda t: t)
         rssi_str = f"{rssi:>4} " if isinstance(rssi, int) else f"{'—':>5}"
-        line = f"{status}   {name:<{w_name}}  {addr:<{w_addr}}  {rssi_str}  {alias}"
+        ver_str = f"  {versions[addr]:<{w_ver}}" if w_ver and addr in versions else (f"  {'':>{w_ver}}" if w_ver else "")
+        line = f"{status}   {name:<{w_name}}  {addr:<{w_addr}}  {rssi_str}  {alias:<{w_alias}}{ver_str}"
         print(color(line))
 
     print()
@@ -156,8 +184,14 @@ def main() -> None:
         metavar="SECONDS",
         help=f"How long to scan (default: {SCAN_TIMEOUT_DEFAULT:.0f}s)",
     )
+    parser.add_argument(
+        "--read-version", "-V",
+        action="store_true",
+        default=False,
+        help="After scanning, connect to each ESP32-KB device and read its firmware version (adds ~2-3s per device)",
+    )
     args = parser.parse_args()
-    asyncio.run(scan(args.timeout))
+    asyncio.run(scan(args.timeout, args.read_version))
 
 
 if __name__ == "__main__":

@@ -50,10 +50,11 @@ fun SettingsScreen(
     onProvisionClick: () -> Unit,
     onFactoryReset: () -> Unit,
 ) {
-    val currentLayout  by viewModel.layout.collectAsState()
-    val currentOs      by viewModel.targetOs.collectAsState()
-    val mouseEnabled   by viewModel.mouseEnabled.collectAsState()
-    val statusMessage  by viewModel.statusMessage.collectAsState()
+    val currentLayout    by viewModel.layout.collectAsState()
+    val currentOs        by viewModel.targetOs.collectAsState()
+    val mouseEnabled     by viewModel.mouseEnabled.collectAsState()
+    val firmwareVersion  by viewModel.firmwareVersion.collectAsState()
+    val statusMessage    by viewModel.statusMessage.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
 
     // Seed from the active device's saved values; re-reads on every screen entry after reconnect.
@@ -159,6 +160,17 @@ fun SettingsScreen(
 
             HorizontalDivider()
             Spacer(Modifier.height(16.dp))
+
+            if (firmwareVersion.isNotEmpty()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text("Firmware Version", style = MaterialTheme.typography.labelLarge)
+                    Text(firmwareVersion, style = MaterialTheme.typography.bodyMedium)
+                }
+                Spacer(Modifier.height(16.dp))
+            }
 
             Button(
                 onClick = onProvisionClick,

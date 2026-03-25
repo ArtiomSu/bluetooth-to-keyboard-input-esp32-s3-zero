@@ -15,7 +15,8 @@ object BleConstants {
     val CHAR_RAW_UUID: UUID       = UUID.fromString("12340008-1234-1234-1234-123456789abc")
     val CHAR_PROVISION_UUID: UUID = UUID.fromString("12340009-1234-1234-1234-123456789abc")
     val CHAR_MOUSE_UUID: UUID    = UUID.fromString("1234000A-1234-1234-1234-123456789abc")
-    val CHAR_MOUSE_EN_UUID: UUID = UUID.fromString("1234000B-1234-1234-1234-123456789abc")
+    val CHAR_MOUSE_EN_UUID: UUID       = UUID.fromString("1234000B-1234-1234-1234-123456789abc")
+    val CHAR_FIRMWARE_VER_UUID: UUID   = UUID.fromString("1234000C-1234-1234-1234-123456789abc")
 
     // Standard BLE descriptor for enabling notifications
     val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
@@ -23,7 +24,7 @@ object BleConstants {
     const val DEFAULT_DEVICE_NAME = "ESP32-KB"
     const val DEFAULT_USB_VID = 0x303A
     const val DEFAULT_USB_PID = 0x1001
-    const val DEFAULT_USB_MANUFACTURER = "ESP32-S3"
+    const val DEFAULT_USB_MANUFACTURER = "ArtiomSu"
     const val DEFAULT_USB_SERIAL = ""
     const val DEFAULT_PSK_HEX =
         "a3f1c8e2b5d4079612fe3a8bc9e05d7f" +

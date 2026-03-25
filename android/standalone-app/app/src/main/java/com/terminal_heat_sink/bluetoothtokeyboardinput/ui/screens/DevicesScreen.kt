@@ -116,7 +116,8 @@ private fun SavedDeviceRow(
     ListItem(
         headlineContent = { Text(device.alias) },
         supportingContent = {
-            Text("${device.bleName}  •  ${device.layout}  •  ${device.targetOs}")
+            val fw = if (!device.firmwareVersion.isNullOrEmpty()) "  •  fw ${device.firmwareVersion}" else ""
+            Text("${device.bleName}  •  ${device.layout}  •  ${device.targetOs}$fw")
         },
         trailingContent = {
             Row(verticalAlignment = Alignment.CenterVertically) {

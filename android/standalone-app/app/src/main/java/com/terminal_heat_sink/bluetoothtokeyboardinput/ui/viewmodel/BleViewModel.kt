@@ -62,6 +62,9 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
     private val _mouseEnabled = MutableStateFlow(false)
     val mouseEnabled: StateFlow<Boolean> = _mouseEnabled.asStateFlow()
 
+    private val _firmwareVersion = MutableStateFlow("")
+    val firmwareVersion: StateFlow<String> = _firmwareVersion.asStateFlow()
+
     // Accumulated deltas for in-flight mouse moves — merged into the next send.
     private var mouseMovePending = false
     private var pendingMoveX = 0
@@ -177,9 +180,16 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
                 _targetOs.value = config.targetOs
                 // Read mouse-enabled state before making UI interactive.
                 _mouseEnabled.value = bleManager.readMouseEnabled()
+                _firmwareVersion.value = bleManager.readFirmwareVersion()
+                // Persist the firmware version so it can be shown in the device list
+                // without connecting. Keyed on alias so it's a safe upsert.
+                val updatedConfig = config.copy(firmwareVersion = _firmwareVersion.value)
+                activeDevice = updatedConfig
+                repository.save(updatedConfig)
                 // Only now tell the UI the device is ready.
                 bleManager.markReady()
-                _statusMessage.value = "Connected to ${config.bleName}"
+                // no need to show the message here. its obvious to the user.
+                //_statusMessage.value = "Connected to ${config.bleName}"
             } catch (e: Exception) {
                 // Ensure GATT is closed and state is clean if settings application fails
                 // after a successful BLE connect (e.g. write timeout mid-config).

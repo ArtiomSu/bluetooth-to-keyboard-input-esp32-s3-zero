@@ -53,7 +53,7 @@
 #define DEFAULT_USB_SERIAL         ""          // empty = no serial number shown
 #define DEFAULT_USB_VID            0x303A      // Espressif VID (default)
 #define DEFAULT_USB_PID            0x1001      // Generic HID
-#define FIRMWARE_VERSION           0x0101      // hardcoded, not configurable
+#define FIRMWARE_VERSION           0x0102      // hardcoded, not configurable
 #define SERVICE_UUID            "12340000-1234-1234-1234-123456789abc"
 #define CHARACTERISTIC_UUID     "12340001-1234-1234-1234-123456789abc"
 #define LAYOUT_CHAR_UUID        "12340002-1234-1234-1234-123456789abc"  // write "en-US" or "en-GB"
@@ -66,6 +66,7 @@
 #define PROVISION_CHAR_UUID     "12340009-1234-1234-1234-123456789abc"  // write: HMAC(curPSK, payload) + [name_len:1][name][new_psk:32]
 #define MOUSE_CHAR_UUID         "1234000A-1234-1234-1234-123456789abc"  // write: raw (unencrypted) mouse event [1-byte type][payload]
 #define MOUSE_EN_CHAR_UUID      "1234000B-1234-1234-1234-123456789abc"  // write: HMAC(PSK, [0x00|0x01]) to disable/enable mouse
+#define FIRMWARE_VER_CHAR_UUID  "1234000C-1234-1234-1234-123456789abc"  // read-only: 2-byte big-endian firmware version (e.g. 0x01 0x01 = v1.1)
 
 // Encrypted packet layout: [32 mac_pubkey][12 nonce][ciphertext][16 GCM tag]
 #define CRYPTO_OVERHEAD 60   // 32 + 12 + 16
@@ -1148,6 +1149,18 @@ void setup() {
     pMouseEn->setCallbacks(new MouseEnCallbacks());
     static uint8_t initMouseEn = mouseEnabled ? 0x01 : 0x00;
     pMouseEn->setValue(&initMouseEn, 1);
+
+    // Firmware version characteristic — read-only, 2-byte big-endian.
+    // Allows BLE clients to confirm they are talking to a compatible firmware.
+    BLECharacteristic *pFirmwareVer = pService->createCharacteristic(
+        FIRMWARE_VER_CHAR_UUID,
+        BLECharacteristic::PROPERTY_READ
+    );
+    static const uint8_t FIRMWARE_VER_BYTES[2] = {
+        (uint8_t)((FIRMWARE_VERSION >> 8) & 0xFF),
+        (uint8_t)( FIRMWARE_VERSION       & 0xFF)
+    };
+    pFirmwareVer->setValue(FIRMWARE_VER_BYTES, 2);
 
     pService->start();
 
