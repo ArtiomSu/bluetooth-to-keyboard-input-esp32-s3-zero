@@ -213,10 +213,48 @@ async def run_script(
     except OSError as e:
         raise ScriptError(f"Cannot open script file {script_path!r}: {e}")
 
+    # ── Pass 1: collect FUNCTION definitions ─────────────────────────────────
+    # Stores function name → list of (lineno, cmd, rest) triples.
+    functions: dict[str, list[tuple[int, str, str]]] = {}
+    _in_func: str | None = None
+    _func_body: list[tuple[int, str, str]] = []
+
+    for _lno, _raw in enumerate(lines, 1):
+        _stripped = _raw.strip()
+        if not _stripped:
+            continue
+        _parts = _stripped.split(" ", 1)
+        _cmd = _parts[0].upper()
+        _rest = _parts[1] if len(_parts) > 1 else ""
+
+        if _in_func is not None:
+            if _cmd == "FUNCTION":
+                raise ScriptError(
+                    f"Line {_lno}: Nested FUNCTION definitions are not allowed"
+                )
+            elif _cmd == "END_FUNCTION":
+                functions[_in_func] = _func_body.copy()
+                _in_func = None
+                _func_body = []
+            else:
+                _func_body.append((_lno, _cmd, _rest))
+        elif _cmd == "FUNCTION":
+            if not _rest.strip():
+                raise ScriptError(f"Line {_lno}: FUNCTION requires a name")
+            _in_func = _rest.strip()
+            _func_body = []
+        elif _cmd == "END_FUNCTION":
+            raise ScriptError(f"Line {_lno}: END_FUNCTION without matching FUNCTION")
+
+    if _in_func is not None:
+        raise ScriptError(f"FUNCTION '{_in_func}' has no matching END_FUNCTION")
+
+    # ── Pass 2: execute ───────────────────────────────────────────────────────
     # Track the previous executable command for REPEAT support.
-    # REPEAT itself and REM/blank lines never become the new "previous".
+    # REPEAT itself, REM, blank lines, and FUNCTION blocks never become the new "previous".
     prev_cmd: str | None = None
     prev_rest: str | None = None
+    in_func_def: bool = False
 
     for lineno, raw_line in enumerate(lines, 1):
         stripped = raw_line.strip()
@@ -231,6 +269,16 @@ async def run_script(
 
         # Comments — never become the previous command.
         if cmd == "REM":
+            continue
+
+        # Skip over FUNCTION definition blocks (already collected in pass 1).
+        if cmd == "FUNCTION":
+            in_func_def = True
+            continue
+        if cmd == "END_FUNCTION":
+            in_func_def = False
+            continue
+        if in_func_def:
             continue
 
         # REPEAT n — re-execute the previous command n more times.
@@ -248,10 +296,32 @@ async def run_script(
             print(f"[Script] Line {lineno}: REPEAT {n}×  {prev_cmd}"
                   + (f" {prev_rest}" if prev_rest else ""))
             for _ in range(n):
-                await _execute_command(
-                    client, esp32_pubkey, prev_cmd, prev_rest or "", ctx, lineno
-                )
+                if prev_cmd == "CALL":
+                    for body_lno, body_cmd, body_rest in functions[prev_rest or ""]:
+                        await _execute_command(
+                            client, esp32_pubkey, body_cmd, body_rest, ctx, body_lno
+                        )
+                else:
+                    await _execute_command(
+                        client, esp32_pubkey, prev_cmd, prev_rest or "", ctx, lineno
+                    )
             # REPEAT does not replace the previous command.
+            continue
+
+        # CALL — invoke a named function.
+        if cmd == "CALL":
+            func_name = rest.strip()
+            if not func_name:
+                raise ScriptError(f"Line {lineno}: CALL requires a function name")
+            if func_name not in functions:
+                raise ScriptError(f"Line {lineno}: Unknown function '{func_name}'")
+            print(f"[Script] Line {lineno}: CALL {func_name}")
+            for body_lno, body_cmd, body_rest in functions[func_name]:
+                await _execute_command(
+                    client, esp32_pubkey, body_cmd, body_rest, ctx, body_lno
+                )
+            prev_cmd = cmd
+            prev_rest = func_name
             continue
 
         print(f"[Script] Line {lineno}: {cmd}" + (f" {rest}" if rest else ""))

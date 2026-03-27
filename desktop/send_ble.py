@@ -581,6 +581,10 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     one_shot = " ".join(args.text) if args.text else None
+    # If stdin is a pipe and no text was given on the command line, read the
+    # entire piped input verbatim and type it out (newlines and all).
+    if one_shot is None and not args.script and not sys.stdin.isatty():
+        one_shot = sys.stdin.read()
     if args.script and one_shot:
         parser.error("--script and positional text are mutually exclusive")
     if args.min_delay < 0 or args.max_delay < 0:

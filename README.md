@@ -347,6 +347,14 @@ python send_ble.py
 Type a line and press Return to send it. Press Return on a blank line or
 Ctrl-C to disconnect.
 
+### Stdin pipe / sending files
+
+```bash
+cat anything.txt | python send_ble.py --device "home" --layout en-GB
+```
+
+Will read the entire piped content and send it via send_string, typing it out verbatim — newlines included
+
 ### Running the test suite
 
 `desktop/tests.sh` exercises the full send path and keyboard layouts. Run it

@@ -159,6 +159,29 @@ SET_MAX_DELAY_HOLD 5
 STRING Short key presses
 ```
 
+### Functions
+
+Functions allow you to define a block of commands that can be called multiple times from different places in the script.
+
+```text
+FUNCTION my_func
+    STRING This is a function
+    DELAY 1000
+    STRING It can be called multiple times
+END_FUNCTION
+
+CALL my_func
+```
+
+Functions must be defined before they are called. They cannot be nested. They cannot take parameters (yet). They are not recursive (yet).
+
+if you want to repeatatedly call a function use the `REPEAT` command after the `CALL` command.
+
+```text
+CALL my_func
+REPEAT 2
+```
+At the momement functions are mainly an easy way to run a block of commands multiple times without having to create a giant script file with a lot of repeated lines. So one use case would be an afk script for example.
 
 
 

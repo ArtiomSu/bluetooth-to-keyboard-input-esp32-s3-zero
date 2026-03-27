@@ -38,10 +38,50 @@ suspend fun runScript(
     val ctx = initialContext.copy()
     val lines = scriptText.lines()
 
+    // ── Pass 1: collect FUNCTION definitions ─────────────────────────────────
+    // Stores function name → list of (lineno, cmd, rest) triples.
+    val functions = mutableMapOf<String, List<Triple<Int, String, String>>>()
+    var collectingFunc: String? = null
+    val funcBody = mutableListOf<Triple<Int, String, String>>()
+
+    for ((index, rawLine) in lines.withIndex()) {
+        val lineno = index + 1
+        val line = rawLine.trim()
+        if (line.isEmpty()) continue
+        val spaceIdx = line.indexOf(' ')
+        val fCmd = if (spaceIdx < 0) line else line.substring(0, spaceIdx)
+        val fRest = if (spaceIdx < 0) "" else line.substring(spaceIdx + 1)
+
+        if (collectingFunc != null) {
+            when (fCmd) {
+                "FUNCTION" -> throw ScriptError("Line $lineno: Nested FUNCTION definitions are not allowed")
+                "END_FUNCTION" -> {
+                    functions[collectingFunc!!] = funcBody.toList()
+                    collectingFunc = null
+                    funcBody.clear()
+                }
+                else -> funcBody.add(Triple(lineno, fCmd, fRest))
+            }
+        } else when (fCmd) {
+            "FUNCTION" -> {
+                val name = fRest.trim()
+                if (name.isEmpty()) throw ScriptError("Line $lineno: FUNCTION requires a name")
+                collectingFunc = name
+                funcBody.clear()
+            }
+            "END_FUNCTION" -> throw ScriptError("Line $lineno: END_FUNCTION without matching FUNCTION")
+        }
+    }
+    if (collectingFunc != null) {
+        throw ScriptError("FUNCTION '$collectingFunc' has no matching END_FUNCTION")
+    }
+
+    // ── Pass 2: execute ───────────────────────────────────────────────────────
     // Track the previous executable command so REPEAT can re-run it.
-    // REM, blank lines, and REPEAT itself never update these.
+    // REM, blank lines, FUNCTION blocks, and REPEAT itself never update these.
     var prevCmd: String? = null
     var prevRest: String? = null
+    var inFuncDef = false
 
     for ((index, rawLine) in lines.withIndex()) {
         // Check before starting each command so the current one always completes fully.
@@ -57,6 +97,11 @@ suspend fun runScript(
         // Comments — never become the previous command.
         if (cmd == "REM") continue
 
+        // Skip over FUNCTION definition blocks (already collected in pass 1).
+        if (cmd == "FUNCTION") { inFuncDef = true; continue }
+        if (cmd == "END_FUNCTION") { inFuncDef = false; continue }
+        if (inFuncDef) continue
+
         // REPEAT n — re-execute the previous command n more times.
         if (cmd == "REPEAT") {
             if (prevCmd == null) throw ScriptError("Line $lineno: REPEAT with no previous command")
@@ -64,9 +109,33 @@ suspend fun runScript(
                 ?: throw ScriptError("Line $lineno: REPEAT expects a positive integer, got '$rest'")
             for (i in 1..n) {
                 if (stopRequested()) return
-                executeCommand(prevCmd, prevRest ?: "", lineno, ctx, ble, crypto)
+                if (prevCmd == "CALL") {
+                    val body = functions[prevRest]
+                        ?: throw ScriptError("Line $lineno: Unknown function '$prevRest'")
+                    for ((bodyLineno, bodyCmd, bodyRest) in body) {
+                        if (stopRequested()) return
+                        executeCommand(bodyCmd, bodyRest, bodyLineno, ctx, ble, crypto)
+                    }
+                } else {
+                    executeCommand(prevCmd!!, prevRest ?: "", lineno, ctx, ble, crypto)
+                }
             }
             // REPEAT does not replace the previous command.
+            continue
+        }
+
+        // CALL — invoke a named function.
+        if (cmd == "CALL") {
+            val funcName = rest.trim()
+            if (funcName.isEmpty()) throw ScriptError("Line $lineno: CALL requires a function name")
+            val body = functions[funcName]
+                ?: throw ScriptError("Line $lineno: Unknown function '$funcName'")
+            for ((bodyLineno, bodyCmd, bodyRest) in body) {
+                if (stopRequested()) return
+                executeCommand(bodyCmd, bodyRest, bodyLineno, ctx, ble, crypto)
+            }
+            prevCmd = cmd
+            prevRest = funcName
             continue
         }
 
