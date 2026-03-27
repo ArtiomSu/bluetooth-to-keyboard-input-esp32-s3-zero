@@ -141,6 +141,23 @@ class BleViewModel(application: Application) : AndroidViewModel(application) {
 
         ProcessLifecycleOwner.get().lifecycle.addObserver(processLifecycleObserver)
 
+        // Auto-reconnect: if the app was killed while connected, the ESP32 may still be
+        // physically connected to the Android BLE stack but the new ViewModel doesn't know
+        // about it.  Check getConnectedSystemDevices() and re-establish the GATT session
+        // for any device whose BLE name matches a saved config.  The connect() call will
+        // see the device is already connected at the OS level and complete quickly.
+        viewModelScope.launch {
+            val connectedSystemDevices = bleManager.getConnectedSystemDevices()
+            if (connectedSystemDevices.isNotEmpty()) {
+                val savedConfigs = repository.getAll()
+                for (device in connectedSystemDevices) {
+                    val config = savedConfigs.firstOrNull { it.bleName == device.name } ?: continue
+                    connectToDevice(device, config)
+                    break
+                }
+            }
+        }
+
         // Show/cancel the notification as the connection state changes.
         viewModelScope.launch {
             connectionState.collect { state ->

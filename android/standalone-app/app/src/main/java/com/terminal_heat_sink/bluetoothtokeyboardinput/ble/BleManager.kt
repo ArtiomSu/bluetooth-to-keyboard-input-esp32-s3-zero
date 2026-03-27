@@ -125,6 +125,12 @@ class BleManager(private val context: Context) {
 
     suspend fun connect(device: BluetoothDevice, crypto: CryptoManager) {
         stopScan()
+        // Always clean up any stale GATT from a previous session before starting fresh.
+        // If the app was killed without calling disconnect(), the device may still be
+        // physically connected to the Android BLE stack.  Closing the old GATT object
+        // here allows connectGatt() to succeed; Android will fire onConnectionStateChange
+        // with STATE_CONNECTED almost immediately in that case.
+        closeGatt()
         _connectionState.value = ConnectionState.Connecting
         try {
             pendingConnect = CompletableDeferred()
@@ -153,6 +159,16 @@ class BleManager(private val context: Context) {
         _connectionState.value = ConnectionState.Connected
     }
 
+    /**
+     * Returns all BLE devices currently connected at the Android GATT layer.
+     *
+     * This includes devices that are physically connected but whose GATT session
+     * the app hasn't re-established yet — e.g. after the app was killed while
+     * connected.  The ViewModel uses this on startup to auto-reconnect.
+     */
+    fun getConnectedSystemDevices(): List<BluetoothDevice> =
+        bluetoothManager.getConnectedDevices(android.bluetooth.BluetoothProfile.GATT)
+
     fun disconnect() {
         // Send the BLE disconnect request. The GATT callback's onConnectionStateChange
         // will fire with STATE_DISCONNECTED, at which point we call close() and clean up.
@@ -176,6 +192,17 @@ class BleManager(private val context: Context) {
         gatt = null
         esp32PubkeyBytes = null
         lastCompletion = 0
+        // Drain any stale ready notifications so they don't bleed into the next session.
+        @Suppress("ControlFlowWithEmptyBody")
+        while (readyChannel.tryReceive().isSuccess) {}
+        // Cancel any operations still waiting on a GATT callback that will never arrive
+        // now that the connection is gone.  cancel() on an already-completed Deferred is
+        // a safe no-op, so this is always correct to call unconditionally.
+        if (!pendingConnect.isCompleted)     pendingConnect.cancel()
+        if (!pendingMtu.isCompleted)         pendingMtu.cancel()
+        if (!pendingServiceDisc.isCompleted) pendingServiceDisc.cancel()
+        if (!pendingRead.isCompleted)        pendingRead.cancel()
+        if (!pendingWrite.isCompleted)       pendingWrite.cancel()
     }
 
     // ── MTU ───────────────────────────────────────────────────────────────────
