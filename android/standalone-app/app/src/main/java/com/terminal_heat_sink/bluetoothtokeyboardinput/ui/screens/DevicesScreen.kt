@@ -57,6 +57,13 @@ import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants
 import com.terminal_heat_sink.bluetoothtokeyboardinput.data.DeviceConfig
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ui.viewmodel.BleViewModel
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.zIndex
+import androidx.compose.material.icons.filled.DragHandle
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -74,6 +81,11 @@ fun DevicesScreen(
 
     // Clone dialog state
     var cloneSource by remember { mutableStateOf<DeviceConfig?>(null) }
+
+    // Drag-to-reorder state
+    val lazyListState = rememberLazyListState()
+    var draggingAlias by remember { mutableStateOf<String?>(null) }
+    var draggingOffset by remember { mutableStateOf(0f) }
 
     // ── Export: system Save-file picker ──────────────────────────────────────
     val exportLauncher = rememberLauncherForActivityResult(
@@ -155,6 +167,7 @@ fun DevicesScreen(
             }
         } else {
             LazyColumn(
+                state = lazyListState,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
@@ -174,6 +187,75 @@ fun DevicesScreen(
                 //     HorizontalDivider()
                 // }
                 items(deviceList, key = { it.alias }) { config ->
+                    val index = deviceList.indexOf(config)
+                    val fromIdx = deviceList.indexOfFirst { it.alias == draggingAlias }
+                    val isDragging = index == fromIdx && draggingAlias != null
+
+                    // Average item height for threshold calculations (read from layout each frame).
+                    val avgSize = lazyListState.layoutInfo.visibleItemsInfo
+                        .takeIf { it.isNotEmpty() }
+                        ?.map { it.size }?.average()?.toFloat() ?: 88f
+
+                    // Prospective target index based on current drag offset.
+                    val prospective = if (fromIdx >= 0 && avgSize > 0)
+                        (fromIdx + (draggingOffset / avgSize).roundToInt())
+                            .coerceIn(0, deviceList.size - 1)
+                    else -1
+
+                    // Visual y-offset: dragged item follows the finger; items in its path shift.
+                    val visualOffset = when {
+                        isDragging -> draggingOffset
+                        fromIdx >= 0 && prospective > fromIdx && index in (fromIdx + 1)..prospective -> -avgSize
+                        fromIdx >= 0 && prospective < fromIdx && index in prospective until fromIdx -> avgSize
+                        else -> 0f
+                    }
+
+                    // Drag gesture attached to the drag-handle icon inside the row.
+                    // Keyed on the stable alias so the coroutine survives recompositions
+                    // that happen while draggingOffset changes.
+                    val dragHandleModifier = Modifier.pointerInput(config.alias) {
+                        detectDragGesturesAfterLongPress(
+                            onDragStart = {
+                                draggingAlias = config.alias
+                                draggingOffset = 0f
+                            },
+                            onDragEnd = {
+                                val fIdx = deviceList.indexOfFirst { it.alias == draggingAlias }
+                                if (fIdx >= 0) {
+                                    val itemH = lazyListState.layoutInfo.visibleItemsInfo
+                                        .firstOrNull { it.index == fIdx }?.size?.toFloat() ?: avgSize
+                                    val tIdx = if (itemH > 0)
+                                        (fIdx + (draggingOffset / itemH).roundToInt())
+                                            .coerceIn(0, deviceList.size - 1)
+                                    else fIdx
+                                    if (fIdx != tIdx) {
+                                        val newList = deviceList.toMutableList().also {
+                                            it.add(tIdx, it.removeAt(fIdx))
+                                        }
+                                        deviceList = newList
+                                        // Persist order: Gson deserialises the stored JSON into
+                                        // a LinkedHashMap whose iteration order matches insertion
+                                        // order. Deleting all entries then re-saving in the new
+                                        // order means getAll() returns them in that order next
+                                        // time the app starts.
+                                        newList.forEach { viewModel.repository.delete(it.alias) }
+                                        newList.forEach { viewModel.repository.save(it) }
+                                    }
+                                }
+                                draggingAlias = null
+                                draggingOffset = 0f
+                            },
+                            onDragCancel = {
+                                draggingAlias = null
+                                draggingOffset = 0f
+                            },
+                            onDrag = { change, dragAmount ->
+                                change.consume()
+                                draggingOffset += dragAmount.y
+                            },
+                        )
+                    }
+
                     SavedDeviceRow(
                         device = config,
                         onConnect = {
@@ -185,6 +267,11 @@ fun DevicesScreen(
                             deviceList = viewModel.repository.getAll()
                         },
                         onClone = { cloneSource = config },
+                        isDragging = isDragging,
+                        dragHandleModifier = dragHandleModifier,
+                        modifier = Modifier
+                            .zIndex(if (isDragging) 1f else 0f)
+                            .graphicsLayer { translationY = visualOffset },
                     )
                     HorizontalDivider()
                 }
@@ -220,6 +307,9 @@ private fun SavedDeviceRow(
     onConnect: () -> Unit,
     onDelete: (() -> Unit)?,
     onClone: (() -> Unit)?,
+    isDragging: Boolean = false,
+    dragHandleModifier: Modifier = Modifier,
+    modifier: Modifier = Modifier,
 ) {
     ListItem(
         headlineContent = { Text(device.alias) },
@@ -229,6 +319,12 @@ private fun SavedDeviceRow(
         },
         trailingContent = {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.DragHandle,
+                    contentDescription = "Drag to reorder",
+                    modifier = dragHandleModifier.padding(horizontal = 12.dp, vertical = 16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 if (onClone != null) {
                     IconButton(onClick = onClone) {
                         Icon(Icons.Default.ContentCopy, contentDescription = "Clone profile")
@@ -241,7 +337,7 @@ private fun SavedDeviceRow(
                 }
             }
         },
-        modifier = Modifier.clickable(onClick = onConnect),
+        modifier = modifier.clickable(onClick = onConnect),
     )
 }
 
