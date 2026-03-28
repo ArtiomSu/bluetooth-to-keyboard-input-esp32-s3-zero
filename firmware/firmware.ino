@@ -41,6 +41,13 @@
 // ESP-IDF system — for esp_restart() used in fatal crypto error handling
 #include <esp_system.h>
 
+// TinyUSB — bundled with ESP32 Arduino core.
+// tud_mounted()   — true once the USB host has enumerated (SET_CONFIGURATION received).
+// tud_suspended() — true when the USB bus is suspended (PC off/sleeping, no activity).
+// Both are declared here to avoid pulling in the full tusb.h header.
+extern "C" bool tud_mounted(void);
+extern "C" bool tud_suspended(void);
+
 // Adafruit NeoPixel — for the onboard WS2812 RGB LED (GPIO10)
 #include <Adafruit_NeoPixel.h>
 
@@ -53,7 +60,7 @@
 #define DEFAULT_USB_SERIAL         ""          // empty = no serial number shown
 #define DEFAULT_USB_VID            0x303A      // Espressif VID (default)
 #define DEFAULT_USB_PID            0x1001      // Generic HID
-#define FIRMWARE_VERSION           0x0102      // hardcoded, not configurable
+#define FIRMWARE_VERSION           0x0103      // hardcoded, not configurable
 #define SERVICE_UUID            "12340000-1234-1234-1234-123456789abc"
 #define CHARACTERISTIC_UUID     "12340001-1234-1234-1234-123456789abc"
 #define LAYOUT_CHAR_UUID        "12340002-1234-1234-1234-123456789abc"  // write "en-US" or "en-GB"
@@ -159,6 +166,10 @@ Adafruit_NeoPixel led(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 enum LedState : uint8_t { LED_IDLE = 0, LED_CONNECTED, LED_TYPING };
 static volatile LedState ledState     = LED_IDLE;
 static volatile bool     bleConnected = false;
+
+// USB host connection state: true once the host has enumerated (configured)
+// the device.  BLE advertising and the LED are suppressed until this is set.
+static volatile bool usbHostMounted = false;
 
 // Shared ring-buffer between BLE callback (core 0) and loop() (core 1).
 // portMUX_TYPE + taskENTER/EXIT_CRITICAL coordinate across both cores;
@@ -971,8 +982,9 @@ class ServerCallbacks : public BLEServerCallbacks {
     void onDisconnect(BLEServer *pServer) override {
         bleConnected = false;
         ledState = LED_IDLE;
-        // Restart advertising so the host can reconnect
-        BLEDevice::startAdvertising();
+        // Only re-advertise if a USB host is still present; no point advertising
+        // into the void if USB was unplugged while the BLE session was active.
+        if (usbHostMounted) BLEDevice::startAdvertising();
     }
 };
 
@@ -984,7 +996,7 @@ static void ledTask(void *) {
     for (;;) {
         on = !on;
         uint32_t color = 0;
-        if (on) {
+        if (on && usbHostMounted) {  // LED stays dark when no USB host is present
             switch (ledState) {
                 case LED_IDLE:      color = led.Color(255,   0,   0); break;  // red
                 case LED_CONNECTED: color = led.Color(  0,   0, 255); break;  // blue
@@ -1164,17 +1176,52 @@ void setup() {
 
     pService->start();
 
-    // Advertise
+    // Configure advertising parameters — loop() will call startAdvertising()
+    // once tud_mounted() confirms a USB host has enumerated the device.
+    // This prevents the ESP32 advertising (and accepting BLE connections) when
+    // the USB port is powered but has no active host (PC off, power-only cable).
     BLEAdvertising *pAdv = BLEDevice::getAdvertising();
     pAdv->addServiceUUID(SERVICE_UUID);
     pAdv->setScanResponse(true);
     pAdv->setMinPreferred(0x06);
     pAdv->setMaxPreferred(0x12);
-    BLEDevice::startAdvertising();
+    // BLEDevice::startAdvertising() is intentionally not called here.
 }
 
 // ── Loop ──────────────────────────────────────────────────────────────────────
 void loop() {
+    // ── USB host detection ───────────────────────────────────────────────────
+    // tud_mounted() is true only after the USB host has sent SET_CONFIGURATION,
+    // which never happens on a powered-but-inactive port or a charge-only cable.
+    // BLE advertising is gated on this so clients cannot connect when there is
+    // nothing to type into.
+    {
+        // tud_mounted() alone is insufficient: when a PC powers off without
+        // sending a USB disconnect (common with always-on ports), TinyUSB
+        // never sees a reset and mounted stays true.  The bus going idle is
+        // always reflected as a suspend, so require non-suspended as well.
+        bool mounted = tud_mounted() && !tud_suspended();
+        if (mounted && !usbHostMounted) {
+            usbHostMounted = true;
+            BLEDevice::startAdvertising();
+        } else if (!mounted && usbHostMounted) {
+            usbHostMounted = false;
+            BLEDevice::stopAdvertising();
+            // Any active BLE session becomes non-functional without a USB host;
+            // the client will time out. LED is suppressed by usbHostMounted.
+        }
+    }
+
+    // No USB host: nothing to advertise, nothing to type.
+    // Poll slowly (500 ms) so the CPU spends most of its time in the FreeRTOS
+    // idle task, which puts the core into WFI (Wait For Interrupt) — a low-power
+    // halt that cuts active-mode current significantly without risking disruption
+    // to the USB peripheral's enumeration detection.
+    if (!usbHostMounted) {
+        delay(500);
+        return;
+    }
+
     // Drain the queue and type each pending string
     bool typed = false;
     while (true) {
