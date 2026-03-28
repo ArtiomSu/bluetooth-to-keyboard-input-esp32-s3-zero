@@ -60,7 +60,7 @@ extern "C" bool tud_suspended(void);
 #define DEFAULT_USB_SERIAL         ""          // empty = no serial number shown
 #define DEFAULT_USB_VID            0x303A      // Espressif VID (default)
 #define DEFAULT_USB_PID            0x1001      // Generic HID
-#define FIRMWARE_VERSION           0x0103      // hardcoded, not configurable
+#define FIRMWARE_VERSION           0x0104      // hardcoded, not configurable
 #define SERVICE_UUID            "12340000-1234-1234-1234-123456789abc"
 #define CHARACTERISTIC_UUID     "12340001-1234-1234-1234-123456789abc"
 #define LAYOUT_CHAR_UUID        "12340002-1234-1234-1234-123456789abc"  // write "en-US" or "en-GB"
@@ -212,6 +212,7 @@ static uint8_t                  ecPubKeySig[32];    // HMAC-SHA256(PSK, ecPubKey
 
 // Global pointers to characteristics that are updated at runtime.
 // Set once in setup() after the characteristics are created.
+static BLEServer         *gBleServer   = nullptr;  // needed to force-disconnect clients
 static BLECharacteristic *gPubKeyChar    = nullptr;
 static BLECharacteristic *gPubKeySigChar = nullptr;
 static BLECharacteristic *gReadyChar     = nullptr;  // 0x01=ready, 0x00=busy typing
@@ -1055,6 +1056,7 @@ void setup() {
 
     BLEServer *pServer = BLEDevice::createServer();
     pServer->setCallbacks(new ServerCallbacks());
+    gBleServer = pServer;
 
     BLEService *pService = pServer->createService(SERVICE_UUID);
 
@@ -1207,8 +1209,15 @@ void loop() {
         } else if (!mounted && usbHostMounted) {
             usbHostMounted = false;
             BLEDevice::stopAdvertising();
-            // Any active BLE session becomes non-functional without a USB host;
-            // the client will time out. LED is suppressed by usbHostMounted.
+            // Force-disconnect any active BLE client — without a USB host there
+            // is nothing to type into, so the connection is useless.  Disconnecting
+            // explicitly lets the client know immediately rather than waiting for
+            // its own timeout.  onDisconnect() will fire but won't re-advertise
+            // because usbHostMounted is already false.
+            if (gBleServer && bleConnected) {
+                auto peers = gBleServer->getPeerDevices(false);
+                for (auto &p : peers) gBleServer->disconnect(p.first);
+            }
         }
     }
 
