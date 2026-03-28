@@ -1,7 +1,16 @@
+FUNCTION inner
+    STRINGLN This is the inner function
+END_FUNCTION
+
 FUNCTION my_func
     STRINGLN This is a function
     DELAY 500
     STRINGLN It can be called multiple times
+    STRING delete me
+    BACKSPACE 
+    REPEAT 8
+    STRINGLN It can also call other functions
+    CALL inner
 END_FUNCTION
 
 REM go into a terminal. I'll wait for 3 seconds
@@ -14,10 +23,10 @@ DELAY 100
 
 CALL my_func
 
-STRINGLN Now I will repeat the function 3 times
+STRINGLN Now I will repeat the function 2 times
 
 CALL my_func
-REPEAT 3
+REPEAT 2
 
 CTRL_DOWN
 STRING c

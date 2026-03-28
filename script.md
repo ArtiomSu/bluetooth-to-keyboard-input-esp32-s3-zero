@@ -173,7 +173,7 @@ END_FUNCTION
 CALL my_func
 ```
 
-Functions must be defined before they are called. They cannot be nested. They cannot take parameters (yet). They are not recursive (yet).
+Functions must be defined before they are called. They cannot be nested. They cannot take parameters (yet). They are not recursive (yet). Functions can call other functions though.
 
 if you want to repeatatedly call a function use the `REPEAT` command after the `CALL` command.
 

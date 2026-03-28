@@ -183,7 +183,13 @@ def _reset_counter() -> None:
 # The 0x00 value signals busy (firmware received a chunk and is typing it).
 # Using a counter instead of a binary flag means stale notifications from a
 # previous chunk carry the old counter value and are correctly ignored.
-_last_completion: int = 0   # last completion counter received from firmware
+#
+# _last_completion is an UNBOUNDED Python-side count of completions received.
+# It does NOT mirror the raw firmware byte (which is a uint8 cycling 1-255).
+# _last_raw_byte remembers the last non-zero byte for deduplication: if the
+# BLE stack delivers the same notification twice, the second copy is ignored.
+_last_completion: int = 0   # absolute count of completions received this session
+_last_raw_byte: int = 0     # last non-zero firmware byte seen (dedup only)
 _notify_event: asyncio.Event | None = None  # set whenever any notify arrives
 
 
@@ -191,16 +197,20 @@ def _on_ready_notify(sender: int, data: bytearray) -> None:
     """Notification handler for the READY characteristic.
 
     The firmware sends 0x00 when it starts typing a chunk, and an incrementing
-    counter value (1, 2, 3, …) when it finishes each chunk.
+    counter value (1-255, cycling back to 1 on overflow) when it finishes each
+    chunk.  We maintain our own unbounded absolute count so that the uint8
+    cycle in the firmware never causes waitForReady to hang.
     """
-    global _last_completion, _notify_event
+    global _last_completion, _last_raw_byte, _notify_event
     if not data:
         return
     val = data[0]
-    if val > 0:
-        # Only advance — ignore any value ≤ last seen (handles duplicates/reorder).
-        if val > _last_completion:
-            _last_completion = val
+    if val > 0 and val != _last_raw_byte:
+        # New, non-BUSY notification — count it regardless of the raw byte value.
+        # Deduplication via _last_raw_byte prevents double-counting if the BLE
+        # stack happens to deliver the same notification twice.
+        _last_raw_byte = val
+        _last_completion += 1
     # Wake up anyone waiting in wait_for_ready, they'll re-check the counter.
     if _notify_event is not None:
         _notify_event.set()
@@ -464,8 +474,9 @@ async def main(one_shot_text: str | None = None, layout: str = "en-US", target_o
         # Subscribe to ready notifications before doing anything else.
         # The firmware pushes a monotonically increasing completion counter
         # after each chunk is fully typed.
-        global _last_completion, _notify_event
+        global _last_completion, _last_raw_byte, _notify_event
         _last_completion = 0
+        _last_raw_byte = 0
         _notify_event = asyncio.Event()
         await client.start_notify(READY_CHAR_UUID, _on_ready_notify)
 

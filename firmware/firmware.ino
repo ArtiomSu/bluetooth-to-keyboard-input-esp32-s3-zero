@@ -60,7 +60,7 @@ extern "C" bool tud_suspended(void);
 #define DEFAULT_USB_SERIAL         ""          // empty = no serial number shown
 #define DEFAULT_USB_VID            0x303A      // Espressif VID (default)
 #define DEFAULT_USB_PID            0x1001      // Generic HID
-#define FIRMWARE_VERSION           0x0104      // hardcoded, not configurable
+#define FIRMWARE_VERSION           0x0105      // hardcoded, not configurable
 #define SERVICE_UUID            "12340000-1234-1234-1234-123456789abc"
 #define CHARACTERISTIC_UUID     "12340001-1234-1234-1234-123456789abc"
 #define LAYOUT_CHAR_UUID        "12340002-1234-1234-1234-123456789abc"  // write "en-US" or "en-GB"
@@ -1292,6 +1292,7 @@ void loop() {
         ledState = bleConnected ? LED_CONNECTED : LED_IDLE;
         if (gReadyChar) {
             gCompletions++;
+            if (gCompletions == 0) gCompletions = 1;  // 0x00 is reserved for BUSY — never use it as completion
             uint8_t c = gCompletions;  // copy volatile before passing to setValue
             gReadyChar->setValue(&c, 1);
             gReadyChar->notify();

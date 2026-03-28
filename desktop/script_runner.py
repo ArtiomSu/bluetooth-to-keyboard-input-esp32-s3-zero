@@ -171,6 +171,65 @@ async def _execute_command(
     else:
         raise ScriptError(f"Line {lineno}: Unknown command {cmd!r}")
 
+# ── Function-body executor ───────────────────────────────────────────────
+
+async def _execute_body(
+    client: BleakClient,
+    esp32_pubkey: bytes,
+    commands: list[tuple[int, str, str]],
+    ctx: dict,
+    functions: dict,
+) -> None:
+    """Execute a sequence of (lineno, cmd, rest) triples with REPEAT and CALL support.
+
+    Carries its own prev_cmd / prev_rest state so REPEAT works correctly inside
+    function bodies.  Called recursively for nested CALLs.
+    """
+    prev_cmd: str | None = None
+    prev_rest: str | None = None
+
+    for lineno, cmd, rest in commands:
+        if cmd == "REM":
+            continue
+
+        if cmd == "REPEAT":
+            if prev_cmd is None:
+                raise ScriptError(f"Line {lineno}: REPEAT with no previous command")
+            try:
+                n = int(rest)
+                if n < 1:
+                    raise ValueError
+            except ValueError:
+                raise ScriptError(
+                    f"Line {lineno}: REPEAT expects a positive integer, got {rest!r}"
+                )
+            print(f"[Script] Line {lineno}: REPEAT {n}×  {prev_cmd}"
+                  + (f" {prev_rest}" if prev_rest else ""))
+            for _ in range(n):
+                if prev_cmd == "CALL":
+                    func_name = prev_rest or ""
+                    if func_name not in functions:
+                        raise ScriptError(f"Line {lineno}: Unknown function '{func_name}'")
+                    await _execute_body(client, esp32_pubkey, functions[func_name], ctx, functions)
+                else:
+                    await _execute_command(client, esp32_pubkey, prev_cmd, prev_rest or "", ctx, lineno)
+            continue
+
+        if cmd == "CALL":
+            func_name = rest.strip()
+            if not func_name:
+                raise ScriptError(f"Line {lineno}: CALL requires a function name")
+            if func_name not in functions:
+                raise ScriptError(f"Line {lineno}: Unknown function '{func_name}'")
+            print(f"[Script] Line {lineno}: CALL {func_name}")
+            await _execute_body(client, esp32_pubkey, functions[func_name], ctx, functions)
+            prev_cmd = cmd
+            prev_rest = func_name
+            continue
+
+        await _execute_command(client, esp32_pubkey, cmd, rest, ctx, lineno)
+        prev_cmd = cmd
+        prev_rest = rest
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
@@ -297,10 +356,9 @@ async def run_script(
                   + (f" {prev_rest}" if prev_rest else ""))
             for _ in range(n):
                 if prev_cmd == "CALL":
-                    for body_lno, body_cmd, body_rest in functions[prev_rest or ""]:
-                        await _execute_command(
-                            client, esp32_pubkey, body_cmd, body_rest, ctx, body_lno
-                        )
+                    await _execute_body(
+                        client, esp32_pubkey, functions[prev_rest or ""], ctx, functions
+                    )
                 else:
                     await _execute_command(
                         client, esp32_pubkey, prev_cmd, prev_rest or "", ctx, lineno
@@ -316,10 +374,7 @@ async def run_script(
             if func_name not in functions:
                 raise ScriptError(f"Line {lineno}: Unknown function '{func_name}'")
             print(f"[Script] Line {lineno}: CALL {func_name}")
-            for body_lno, body_cmd, body_rest in functions[func_name]:
-                await _execute_command(
-                    client, esp32_pubkey, body_cmd, body_rest, ctx, body_lno
-                )
+            await _execute_body(client, esp32_pubkey, functions[func_name], ctx, functions)
             prev_cmd = cmd
             prev_rest = func_name
             continue

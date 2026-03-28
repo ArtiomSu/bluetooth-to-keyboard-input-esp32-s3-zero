@@ -3,8 +3,10 @@
 source .venv/bin/activate
 
 MAIN_LAYOUT="en-GB"
-MAIN_OS="macos"
-DEVICE="home"
+#MAIN_OS="macos"
+MAIN_OS="other"
+#DEVICE="home"
+DEVICE="thinkpad"
 
 function generate_pattern() {
     length=$1
@@ -147,6 +149,12 @@ function script_tests(){
     read -p "Enter your choice: " choice
     if [[ "$choice" == "y" ]]; then
         python send_ble.py --device "$DEVICE" --layout "$MAIN_LAYOUT" --os "$MAIN_OS" --script test_script_functions.txt
+    fi
+
+    echo "Run test_script_stability.txt? y/n"
+    read -p "Enter your choice: " choice
+    if [[ "$choice" == "y" ]]; then
+        python send_ble.py --device "$DEVICE" --layout "$MAIN_LAYOUT" --os "$MAIN_OS" --script test_script_stability.txt
     fi
 }
 

@@ -112,10 +112,7 @@ suspend fun runScript(
                 if (prevCmd == "CALL") {
                     val body = functions[prevRest]
                         ?: throw ScriptError("Line $lineno: Unknown function '$prevRest'")
-                    for ((bodyLineno, bodyCmd, bodyRest) in body) {
-                        if (stopRequested()) return
-                        executeCommand(bodyCmd, bodyRest, bodyLineno, ctx, ble, crypto)
-                    }
+                    executeBody(body, functions, ctx, ble, crypto, stopRequested)
                 } else {
                     executeCommand(prevCmd!!, prevRest ?: "", lineno, ctx, ble, crypto)
                 }
@@ -130,10 +127,62 @@ suspend fun runScript(
             if (funcName.isEmpty()) throw ScriptError("Line $lineno: CALL requires a function name")
             val body = functions[funcName]
                 ?: throw ScriptError("Line $lineno: Unknown function '$funcName'")
-            for ((bodyLineno, bodyCmd, bodyRest) in body) {
+            executeBody(body, functions, ctx, ble, crypto, stopRequested)
+            prevCmd = cmd
+            prevRest = funcName
+            continue
+        }
+
+        executeCommand(cmd, rest, lineno, ctx, ble, crypto)
+        prevCmd = cmd
+        prevRest = rest
+    }
+}
+
+/**
+ * Execute a sequence of (lineno, cmd, rest) triples with full REPEAT and CALL support.
+ *
+ * Carries its own prevCmd / prevRest state so REPEAT works correctly inside
+ * function bodies.  Called recursively for nested CALLs.
+ */
+private suspend fun executeBody(
+    commands: List<Triple<Int, String, String>>,
+    functions: Map<String, List<Triple<Int, String, String>>>,
+    ctx: ScriptContext,
+    ble: BleManager,
+    crypto: CryptoManager,
+    stopRequested: () -> Boolean,
+) {
+    var prevCmd: String? = null
+    var prevRest: String? = null
+
+    for ((lineno, cmd, rest) in commands) {
+        if (stopRequested()) return
+        if (cmd == "REM") continue
+
+        if (cmd == "REPEAT") {
+            if (prevCmd == null) throw ScriptError("Line $lineno: REPEAT with no previous command")
+            val n = rest.trim().toIntOrNull()?.takeIf { it >= 1 }
+                ?: throw ScriptError("Line $lineno: REPEAT expects a positive integer, got '$rest'")
+            for (i in 1..n) {
                 if (stopRequested()) return
-                executeCommand(bodyCmd, bodyRest, bodyLineno, ctx, ble, crypto)
+                if (prevCmd == "CALL") {
+                    val body = functions[prevRest]
+                        ?: throw ScriptError("Line $lineno: Unknown function '$prevRest'")
+                    executeBody(body, functions, ctx, ble, crypto, stopRequested)
+                } else {
+                    executeCommand(prevCmd!!, prevRest ?: "", lineno, ctx, ble, crypto)
+                }
             }
+            continue
+        }
+
+        if (cmd == "CALL") {
+            val funcName = rest.trim()
+            if (funcName.isEmpty()) throw ScriptError("Line $lineno: CALL requires a function name")
+            val body = functions[funcName]
+                ?: throw ScriptError("Line $lineno: Unknown function '$funcName'")
+            executeBody(body, functions, ctx, ble, crypto, stopRequested)
             prevCmd = cmd
             prevRest = funcName
             continue

@@ -83,9 +83,14 @@ class BleManager(private val context: Context) {
     private var pendingRead        = CompletableDeferred<ByteArray>()
     private var pendingWrite       = CompletableDeferred<Unit>()
 
-    // Completion counter channel for READY notifications from firmware
+    // Completion counter channel for READY notifications from firmware.
+    // lastCompletion is an unbounded absolute count of completions received THIS session.
+    // It does NOT mirror the raw firmware byte (uint8 cycling 1-255) — that value is
+    // used only for deduplication via lastRawByte so double-delivered notifications
+    // from the BLE stack are not counted twice.
     private val readyChannel = Channel<Int>(Channel.UNLIMITED)
     private var lastCompletion = 0
+    private var lastRawByte = 0
 
     private val scannedDevices = mutableListOf<ScannedDevice>()
 
@@ -192,6 +197,7 @@ class BleManager(private val context: Context) {
         gatt = null
         esp32PubkeyBytes = null
         lastCompletion = 0
+        lastRawByte = 0
         // Drain any stale ready notifications so they don't bleed into the next session.
         @Suppress("ControlFlowWithEmptyBody")
         while (readyChannel.tryReceive().isSuccess) {}
@@ -276,8 +282,7 @@ class BleManager(private val context: Context) {
         try {
             withTimeout(READY_TIMEOUT_MS) {
                 while (lastCompletion < targetCompletion) {
-                    val value = readyChannel.receive()
-                    if (value > lastCompletion) lastCompletion = value
+                    readyChannel.receive()  // lastCompletion updated by onCharacteristicChangedCompat
                 }
             }
         } catch (e: TimeoutCancellationException) {
@@ -605,8 +610,12 @@ class BleManager(private val context: Context) {
         private fun onCharacteristicChangedCompat(value: ByteArray) {
             if (value.isEmpty()) return
             val counter = value[0].toInt() and 0xFF
-            if (counter > 0) {
-                readyChannel.trySend(counter)
+            // Non-zero = completion (0 is BUSY). Deduplicate using lastRawByte so a
+            // BLE-stack duplicate delivery doesn't advance lastCompletion twice.
+            if (counter > 0 && counter != lastRawByte) {
+                lastRawByte = counter
+                lastCompletion++
+                readyChannel.trySend(lastCompletion)
             }
         }
     }
