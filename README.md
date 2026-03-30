@@ -1,6 +1,6 @@
 # bluetooth-to-keyboard-input-esp32-s3-zero
 
-Send text from your desktop (macOS, Linux, or Windows) to an **ESP32-S3 Zero** over BLE; the ESP32 types it out
+Send text from your desktop (macOS, Linux, or Windows) or Android to an **ESP32-S3 Zero** over BLE; the ESP32 types it out
 as a **USB HID keyboard** on whichever machine it is plugged into.
 
 ```
@@ -13,6 +13,12 @@ Supports setting custom USB hid properties like vendor ID, product ID etc. that 
 
 Supports mouse input (move, click, scroll) in addition to keyboard.
 
+Firmware can be flashed directly from the chrome browser [here](https://artiomsu.github.io/#/bluetooth-to-kb-input-flasher) it uses the esp-web-tools library.
+
+Fully featured Android app (see [android/README.md](android/README.md)).
+
+Checkout the [Github Page](https://artiomsu.github.io/#/bluetooth-to-kb-input) for this project for more details photos/videos.
+
 ---
 
 ## Project layout
@@ -22,6 +28,8 @@ bluetooth-input/
 ├── firmware/
 │   ├── firmware.ino   ← Arduino sketch for the ESP32-S3
 │   └── keytypes.h     ← shared types (KeyLayout, KeyOS, KeyEntry)
+├── android/
+│   └─── standalone-app/ ← Android app source code (Kotlin, Gradle)
 └── desktop/
     ├── send_ble.py      ← Python BLE client (macOS, Linux, Windows)
     ├── script_runner.py ← ducky-script parser (used by send_ble.py --script)

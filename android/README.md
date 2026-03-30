@@ -3,17 +3,19 @@
 This contains two projects:
 
 - `standalone-app` — a modern Material Design app that replicates all features of the desktop Python app with a proper mobile UI.
-- `keepass-2-android-plugin` — a plugin for KeePass2Android that uses the ESP32 bridge to type credentials into the target machine. This is a primary use case.
+- ~~`keepass-2-android-plugin` — a plugin for KeePass2Android that uses the ESP32 bridge to type credentials into the target machine. This is a primary use case.~~
 
 ---
 
 ## Standalone app
 
-### Features to implement
+### Features
 
 - **BLE scan + connect** — scan for nearby ESP32-KB devices and connect
 - **Send text** — type or paste text and send it to the connected device
 - **Script editor + runner** — write and run Ducky-style scripts (full parity with `script_runner.py`)
+- **Share Target** — share text from any app to the ESP32-KB via the Android Share sheet
+- **Trackpad** — control mouse movement, clicks, and scroll from the app (unique feature not available in the desktop app (yet))
 - **Device management** — saved device list with alias, BLE name, and PSK (equivalent to `~/.bluetooth-input/devices.json`)
 - **Provisioning flow** — first-time setup and re-provisioning (set BLE name + PSK)
 - **Settings** — keyboard layout (en-US / en-GB), target OS (other / macOS), hold/gap delay tuning
@@ -49,7 +51,7 @@ KeePass2Android supports a plugin API that allows third-party apps to extend its
 
 ### Technical notes
 
-- Uses the KeePass2Android plugin API (Intent-based communication)
+- Uses the KeePass2Android plugin API
 - Shares the BLE + encryption logic with the standalone app — extract this into a shared library module (`core/`) so both apps use the same implementation
 - Plugin settings (device alias, field order, submit on enter) configurable from within KeePass2Android or the standalone app
 - Must handle the case where no device is connected — prompt the user to connect via the standalone app or provide a mini connection UI inline

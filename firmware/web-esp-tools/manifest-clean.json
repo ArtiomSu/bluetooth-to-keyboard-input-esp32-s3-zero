@@ -1,0 +1,16 @@
+{
+  "name": "BtKBi Firmware Factory",
+  "version": "1.5",
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "improv": false,
+      "parts": [
+        {
+          "path": "/btkbi/firmware/firmware.ino.merged.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}
