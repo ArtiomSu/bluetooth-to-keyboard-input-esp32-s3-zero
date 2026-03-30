@@ -13,7 +13,9 @@ import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Build
+import androidx.core.content.ContextCompat
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.CCCD_UUID
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.CHAR_DELAY_UUID
 import com.terminal_heat_sink.bluetoothtokeyboardinput.ble.BleConstants.CHAR_LAYOUT_UUID
@@ -130,33 +132,46 @@ class BleManager(private val context: Context) {
 
     suspend fun connect(device: BluetoothDevice, crypto: CryptoManager) {
         stopScan()
-        // Always clean up any stale GATT from a previous session before starting fresh.
-        // If the app was killed without calling disconnect(), the device may still be
-        // physically connected to the Android BLE stack.  Closing the old GATT object
-        // here allows connectGatt() to succeed; Android will fire onConnectionStateChange
-        // with STATE_CONNECTED almost immediately in that case.
-        closeGatt()
-        _connectionState.value = ConnectionState.Connecting
-        try {
-            pendingConnect = CompletableDeferred()
-            gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
-            withTimeout(20_000L) { pendingConnect.await() }
-            // Services already discovered inside gattCallback
-            requestMtuAndWait()
-            // Request minimum connection interval (~7.5ms) for low-latency mouse input
-            gatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
-            subscribeToReady()
-            val pubkey = readCharacteristic(CHAR_PUBKEY_UUID)
-            val sig    = readCharacteristic(CHAR_PUBKEY_SIG_UUID)
-            esp32PubkeyBytes = crypto.verifyPubkey(pubkey, sig)
-            crypto.resetCounter()
-            // Do NOT emit Connected here — the ViewModel calls markReady() after applying
-            // all saved settings, so the UI only becomes interactive once fully configured.
-        } catch (e: Exception) {
+        // Retry up to 3 times: the LL connection-parameter update Android sends right
+        // after connecting can race with service discovery on the ESP32, causing the link
+        // to drop with HCI status 8.  The 300 ms delay in onConnectionStateChange handles
+        // the common case; retrying covers rare edge cases where that alone is not enough.
+        var lastException: Exception? = null
+        for (attempt in 1..3) {
+            // Always clean up any stale GATT from a previous session before starting fresh.
+            // If the app was killed without calling disconnect(), the device may still be
+            // physically connected to the Android BLE stack.  Closing the old GATT object
+            // here allows connectGatt() to succeed; Android will fire onConnectionStateChange
+            // with STATE_CONNECTED almost immediately in that case.
             closeGatt()
-            _connectionState.value = ConnectionState.Error(e.message ?: "Connection failed")
-            throw e
+            _connectionState.value = ConnectionState.Connecting
+            try {
+                pendingConnect = CompletableDeferred()
+                gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+                withTimeout(20_000L) { pendingConnect.await() }
+                // Services already discovered inside gattCallback
+                requestMtuAndWait()
+                // Request minimum connection interval (~7.5ms) for low-latency mouse input
+                gatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                subscribeToReady()
+                val pubkey = readCharacteristic(CHAR_PUBKEY_UUID)
+                val sig    = readCharacteristic(CHAR_PUBKEY_SIG_UUID)
+                esp32PubkeyBytes = crypto.verifyPubkey(pubkey, sig)
+                crypto.resetCounter()
+                // Do NOT emit Connected here — the ViewModel calls markReady() after applying
+                // all saved settings, so the UI only becomes interactive once fully configured.
+                return
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                closeGatt()
+                throw e   // never swallow coroutine cancellation — it carries job lifecycle signals
+            } catch (e: Exception) {
+                closeGatt()
+                lastException = e
+                if (attempt < 3) kotlinx.coroutines.delay(1000L)
+            }
         }
+        _connectionState.value = ConnectionState.Error(lastException!!.message ?: "Connection failed")
+        throw lastException!!
     }
 
     /** Called by the ViewModel after all saved settings have been pushed to the device. */
@@ -170,9 +185,21 @@ class BleManager(private val context: Context) {
      * This includes devices that are physically connected but whose GATT session
      * the app hasn't re-established yet — e.g. after the app was killed while
      * connected.  The ViewModel uses this on startup to auto-reconnect.
+     *
+     * On Android 12+ (API 31+) this call requires BLUETOOTH_CONNECT at runtime.
+     * Returns an empty list rather than crashing if the permission hasn't been
+     * granted yet — the auto-reconnect is a nice-to-have, not a hard requirement.
      */
-    fun getConnectedSystemDevices(): List<BluetoothDevice> =
-        bluetoothManager.getConnectedDevices(android.bluetooth.BluetoothProfile.GATT)
+    fun getConnectedSystemDevices(): List<BluetoothDevice> {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                android.Manifest.permission.BLUETOOTH_CONNECT
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) return emptyList()
+        }
+        return bluetoothManager.getConnectedDevices(android.bluetooth.BluetoothProfile.GATT)
+    }
 
     fun disconnect() {
         // Send the BLE disconnect request. The GATT callback's onConnectionStateChange
@@ -201,14 +228,16 @@ class BleManager(private val context: Context) {
         // Drain any stale ready notifications so they don't bleed into the next session.
         @Suppress("ControlFlowWithEmptyBody")
         while (readyChannel.tryReceive().isSuccess) {}
-        // Cancel any operations still waiting on a GATT callback that will never arrive
-        // now that the connection is gone.  cancel() on an already-completed Deferred is
-        // a safe no-op, so this is always correct to call unconditionally.
-        if (!pendingConnect.isCompleted)     pendingConnect.cancel()
-        if (!pendingMtu.isCompleted)         pendingMtu.cancel()
-        if (!pendingServiceDisc.isCompleted) pendingServiceDisc.cancel()
-        if (!pendingRead.isCompleted)        pendingRead.cancel()
-        if (!pendingWrite.isCompleted)       pendingWrite.cancel()
+        // Wake any suspended operations with a plain exception (not CancellationException).
+        // Using completeExceptionally() instead of cancel() is critical: cancel() throws
+        // CancellationException which the coroutine machinery treats as a coroutine cancellation
+        // signal, potentially masking the real error and interfering with outer try/catch blocks.
+        val disconnectEx = RuntimeException("BLE disconnected")
+        if (!pendingConnect.isCompleted)     pendingConnect.completeExceptionally(disconnectEx)
+        if (!pendingMtu.isCompleted)         pendingMtu.completeExceptionally(disconnectEx)
+        if (!pendingServiceDisc.isCompleted) pendingServiceDisc.completeExceptionally(disconnectEx)
+        if (!pendingRead.isCompleted)        pendingRead.completeExceptionally(disconnectEx)
+        if (!pendingWrite.isCompleted)       pendingWrite.completeExceptionally(disconnectEx)
     }
 
     // ── MTU ───────────────────────────────────────────────────────────────────
@@ -507,7 +536,19 @@ class BleManager(private val context: Context) {
 
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            // Guard against stale callbacks from a previous GATT connection that fired
+            // after connect() has already created a new gatt object.  This is the root
+            // cause of the post-provisioning connect failure: the ESP32's reboot-triggered
+            // disconnect arrives late on the BT thread and closes the brand-new connection.
+            if (gatt !== this@BleManager.gatt) return
+
             if (newState == BluetoothProfile.STATE_CONNECTED) {
+                // Android sends a LL connection-parameter update right after the link is
+                // established.  Starting service discovery simultaneously prevents the ESP32
+                // from acknowledging it in time (HCI status 8), causing the link to drop.
+                // A 300 ms pause lets that negotiation complete before ATT discovery begins.
+                Thread.sleep(300)
+                if (gatt !== this@BleManager.gatt) return  // gatt may have been closed during sleep
                 gatt.discoverServices()
             } else {
                 // This fires both on a clean disconnect() and on unexpected drops.
