@@ -65,9 +65,10 @@ for file in "${required_files[@]}"; do
 done
 
 # also copy the apk from the android standalone app
-apk_src="../../android/standalone-app/app/build/outputs/apk/release/app-release.apk"
+apk_src="../../android/standalone-app/app/release/app-release.apk"
 if [[ -f "$apk_src" ]]; then
-    cp "$apk_src" "$release_out/"
+    cp "$apk_src" /tmp/
+    echo "Copied APK to /tmp/app-release.apk"
 else
     echo "Warning: APK file not found at '$apk_src'. Skipping APK copy."
 fi

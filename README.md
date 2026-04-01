@@ -19,7 +19,7 @@ Fully featured Android app (see [android/README.md](android/README.md)).
 
 Checkout the [Github Page](https://artiomsu.github.io/#/bluetooth-to-kb-input) for this project for more details photos/videos.
 
-You can download the stl files for the case from the `3d-printing` folder in the repo.
+You can download the stl files for the case from the `3d-printing` folder in the repo. Or download from [Maker World](https://makerworld.com/en/models/2604304-btkbi-esp32-s3-zero-case#profileId-2873828).
 
 ---
 
