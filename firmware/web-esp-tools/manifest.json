@@ -8,19 +8,19 @@
       "improv": false,
       "parts": [
         {
-          "path": "/btkbi/firmware/firmware.ino.bootloader.bin",
+          "path": "https://raw.githubusercontent.com/ArtiomSu/bluetooth-to-keyboard-input-esp32-s3-zero/main/.raw-firmware/firmware.ino.bootloader.bin",
           "offset": 0
         },
         {
-          "path": "/btkbi/firmware/firmware.ino.partitions.bin",
+          "path": "https://raw.githubusercontent.com/ArtiomSu/bluetooth-to-keyboard-input-esp32-s3-zero/main/.raw-firmware/firmware.ino.partitions.bin",
           "offset": 32768
         },
         {
-          "path": "/btkbi/firmware/boot_app0.bin",
+          "path": "https://raw.githubusercontent.com/ArtiomSu/bluetooth-to-keyboard-input-esp32-s3-zero/main/.raw-firmware/boot_app0.bin",
           "offset": 57344
         },
         {
-          "path": "/btkbi/firmware/firmware.ino.bin",
+          "path": "https://raw.githubusercontent.com/ArtiomSu/bluetooth-to-keyboard-input-esp32-s3-zero/main/.raw-firmware/firmware.ino.bin",
           "offset": 65536
         }
       ]

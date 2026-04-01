@@ -7,7 +7,7 @@
       "improv": false,
       "parts": [
         {
-          "path": "/btkbi/firmware/firmware.ino.merged.bin",
+          "path": "https://raw.githubusercontent.com/ArtiomSu/bluetooth-to-keyboard-input-esp32-s3-zero/main/.raw-firmware/firmware.ino.merged.bin",
           "offset": 0
         }
       ]

@@ -1,0 +1,16 @@
+{
+  "name": "BtKBi Firmware Factory",
+  "version": "1.5",
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "improv": false,
+      "parts": [
+        {
+          "path": "https://raw.githubusercontent.com/ArtiomSu/bluetooth-to-keyboard-input-esp32-s3-zero/main/.raw-firmware/firmware.ino.merged.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}

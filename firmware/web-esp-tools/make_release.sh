@@ -2,7 +2,7 @@
 
 firmware_build_dir="../build/esp32.esp32.esp32s3"
 
-release_out="/tmp/btkbi"
+release_out="../../.raw-firmware"
 
 required_files=(
     "firmware.ino.bootloader.bin"
