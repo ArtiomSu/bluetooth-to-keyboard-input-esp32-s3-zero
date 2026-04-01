@@ -1,4 +1,4 @@
-# bluetooth-to-keyboard-input-esp32-s3-zero
+# bluetooth-to-keyboard-input-esp32-s3-zero (BtKBi)
 
 Send text from your desktop (macOS, Linux, or Windows) or Android to an **ESP32-S3 Zero** over BLE; the ESP32 types it out
 as a **USB HID keyboard** on whichever machine it is plugged into.
