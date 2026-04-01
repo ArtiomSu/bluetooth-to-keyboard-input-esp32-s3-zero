@@ -13,11 +13,13 @@ Supports setting custom USB hid properties like vendor ID, product ID etc. that 
 
 Supports mouse input (move, click, scroll) in addition to keyboard.
 
-Firmware can be flashed directly from the chrome browser [here](https://artiomsu.github.io/#/bluetooth-to-kb-input-flasher) it uses the esp-web-tools library.
+Firmware can be flashed directly from the chrome browser [here](https://artiomsu.github.io/#/bluetooth-to-kb-input-flasher) it uses the esp-web-tools library. This is much easier to use than flashing via Arduino IDE, provided you are not making changes to the firmware itself.
 
 Fully featured Android app (see [android/README.md](android/README.md)).
 
 Checkout the [Github Page](https://artiomsu.github.io/#/bluetooth-to-kb-input) for this project for more details photos/videos.
+
+You can download the stl files for the case from the `3d-printing` folder in the repo.
 
 ---
 
